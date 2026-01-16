@@ -23,7 +23,7 @@
 
 **The Problem**: macOS screensavers are boring. The built-in options are static images or basic animations. Third-party fractal viewers are either outdated, slow, or cost money.
 
-**The Solution**: A free, GPU-accelerated Mandelbrot/Julia set screensaver that renders beautiful infinite zooms at 60fps using Apple's Metal framework.
+**The Solution**: A free, GPU-accelerated Mandelbrot/Julia set screensaver that renders beautiful deep zooms at 60fps using Apple's Metal framework.
 
 ### Why Use This?
 
@@ -48,7 +48,7 @@
 5. Open System Settings → Screen Saver → Select "Mandelbrot"
 ```
 
-That's it. Your Mac now has an infinitely zooming fractal screensaver.
+That's it. Your Mac now has a continuously zooming fractal screensaver.
 
 ---
 
@@ -57,7 +57,7 @@ That's it. Your Mac now has an infinitely zooming fractal screensaver.
 | Feature | Mandelbrot Saver | Electric Sheep | Fliqlo | Built-in macOS |
 |---------|------------------|----------------|--------|----------------|
 | GPU Accelerated | **Yes** (Metal) | No (CPU) | No | Partial |
-| Infinite Zoom | **Yes** | No | No | No |
+| Continuous Zoom | **Yes** (cycles through locations) | No | No | No |
 | Customizable | **Yes** (24 palettes, 4 shading modes) | Limited | No | Limited |
 | Julia Sets | **Yes** | No | No | No |
 | Free | **Yes** | Yes | Yes | Yes |
