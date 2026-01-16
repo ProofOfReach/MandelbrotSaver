@@ -56,13 +56,13 @@ That's it. Your Mac now has an infinitely zooming fractal screensaver.
 
 | Feature | Mandelbrot Saver | Electric Sheep | Fliqlo | Built-in macOS |
 |---------|------------------|----------------|--------|----------------|
-| GPU Accelerated | ✅ Metal | ❌ CPU | ❌ | ⚠️ Some |
-| Infinite Zoom | ✅ | ❌ | ❌ | ❌ |
-| Customizable | ✅ 24 palettes, 4 shading modes | ⚠️ Limited | ❌ | ⚠️ Limited |
-| Julia Sets | ✅ | ❌ | ❌ | ❌ |
-| Free | ✅ | ✅ | ✅ | ✅ |
-| Works Offline | ✅ | ❌ Needs network | ✅ | ✅ |
-| Wide Gamut (P3) | ✅ | ❌ | ❌ | ⚠️ Some |
+| GPU Accelerated | **Yes** (Metal) | No (CPU) | No | Partial |
+| Infinite Zoom | **Yes** | No | No | No |
+| Customizable | **Yes** (24 palettes, 4 shading modes) | Limited | No | Limited |
+| Julia Sets | **Yes** | No | No | No |
+| Free | **Yes** | Yes | Yes | Yes |
+| Works Offline | **Yes** | No (needs network) | Yes | Yes |
+| Wide Gamut (P3) | **Yes** | No | No | Partial |
 
 **Best for**: Anyone who wants a beautiful, mesmerizing screensaver that showcases their Mac's GPU.
 
