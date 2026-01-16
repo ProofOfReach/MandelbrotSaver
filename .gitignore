@@ -1,0 +1,8 @@
+# Build artifacts
+*.saver/
+*.air
+*.metallib
+
+# macOS
+.DS_Store
+*.swp
