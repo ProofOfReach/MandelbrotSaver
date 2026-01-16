@@ -15,7 +15,8 @@ A real-time GPU-rendered Mandelbrot and Julia set screensaver for macOS.
 ## Requirements
 
 - macOS 12.0 or later
-- Xcode (for building from source)
+- **No Xcode needed** to install from the release zip
+- Xcode required only if building from source
 
 ## Installation
 
