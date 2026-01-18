@@ -16,6 +16,7 @@ final class Preferences {
         static let autoCyclePalettes = "autoCyclePalettes"
         static let shadingMode = "shadingMode"
         static let juliaMode = "juliaMode"
+        static let enableAntialiasing = "enableAntialiasing"
     }
 
     // MARK: - Defaults
@@ -26,6 +27,7 @@ final class Preferences {
         static let autoCyclePalettes: Bool = true
         static let shadingMode: Int = 0
         static let juliaMode: Bool = false
+        static let enableAntialiasing: Bool = true
     }
 
     // MARK: - Properties
@@ -99,6 +101,20 @@ final class Preferences {
         }
     }
 
+    /// Whether to use 2x2 Supersampling (4x cost, better quality)
+    var enableAntialiasing: Bool {
+        get {
+            if defaults?.object(forKey: Keys.enableAntialiasing) == nil {
+                return Defaults.enableAntialiasing
+            }
+            return defaults?.bool(forKey: Keys.enableAntialiasing) ?? Defaults.enableAntialiasing
+        }
+        set {
+            defaults?.set(newValue, forKey: Keys.enableAntialiasing)
+            defaults?.synchronize()
+        }
+    }
+
     // MARK: - Initialization
 
     private init() {
@@ -112,7 +128,8 @@ final class Preferences {
             Keys.paletteIndex: Defaults.paletteIndex,
             Keys.autoCyclePalettes: Defaults.autoCyclePalettes,
             Keys.shadingMode: Defaults.shadingMode,
-            Keys.juliaMode: Defaults.juliaMode
+            Keys.juliaMode: Defaults.juliaMode,
+            Keys.enableAntialiasing: Defaults.enableAntialiasing
         ])
     }
 
@@ -125,6 +142,7 @@ final class Preferences {
         autoCyclePalettes = Defaults.autoCyclePalettes
         shadingMode = Defaults.shadingMode
         juliaMode = Defaults.juliaMode
+        enableAntialiasing = Defaults.enableAntialiasing
     }
 
     /// Palette names for UI display

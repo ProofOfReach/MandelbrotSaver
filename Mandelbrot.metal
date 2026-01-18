@@ -654,6 +654,7 @@ kernel void mandelbrotKernel(
     constant float4 &params2 [[buffer(1)]],     // colorOffset, aspectRatio, paletteIndex, paletteMix
     constant float4 &params3 [[buffer(2)]],     // centerX_lo, centerY_lo, shadingMode, time
     constant float4 &params4 [[buffer(3)]],     // opacity, juliaMode, juliaCx, juliaCy
+    constant float &highPrecisionFlag [[buffer(4)]], // Optimization flag
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint width = output.get_width();
@@ -683,85 +684,139 @@ kernel void mandelbrotKernel(
     float juliaCx = params4.z;
     float juliaCy = params4.w;
 
-    // Reconstruct center coordinates using double-float precision
-    // floats_to_dd reconstructs from hi/lo float pairs with error tracking
-    dd_real x0 = floats_to_dd(centerX_hi, centerX_lo);
-    dd_real y0 = floats_to_dd(centerY_hi, centerY_lo);
+    bool useHighPrecision = highPrecisionFlag > 0.5f;
 
-    // Map pixel to complex plane with float precision offset
-    float px = (float(gid.x) / float(width) - 0.5f) * scale * aspectRatio;
-    float py = (float(gid.y) / float(height) - 0.5f) * scale;
-
-    x0 = dd_add(x0, dd_set(px));
-    y0 = dd_add(y0, dd_set(py));
-
-    // For Julia mode: c is constant, z starts at pixel position
-    // For Mandelbrot mode: c is pixel position, z starts at 0
-    dd_real cx_dd, cy_dd;
-    dd_real zx, zy;
-
-    if (juliaMode) {
-        // Julia set: z = pixel, c = constant
-        zx = x0;
-        zy = y0;
-        cx_dd = dd_set(juliaCx);
-        cy_dd = dd_set(juliaCy);
-    } else {
-        // Mandelbrot set: z = 0, c = pixel
-        zx = dd_set(0.0f);
-        zy = dd_set(0.0f);
-        cx_dd = x0;
-        cy_dd = y0;
-    }
-
-    // Quick cardioid/bulb check (only for Mandelbrot mode)
-    float cx = cx_dd.hi;
-    float cy = cy_dd.hi;
-    float q = (cx - 0.25f) * (cx - 0.25f) + cy * cy;
-    bool inCardioid = !juliaMode && (q * (q + (cx - 0.25f)) <= 0.25f * cy * cy);
-    bool inBulb = !juliaMode && ((cx + 1.0f) * (cx + 1.0f) + cy * cy <= 0.0625f);
-
+    // Output variables
     float iteration = 0.0f;
-
-    // For distance estimation (single precision is sufficient)
     float dzx = 0.0f;
     float dzy = 0.0f;
-
-    // For smooth coloring
     float final_zx = 0.0f;
     float final_zy = 0.0f;
 
-    if (inCardioid || inBulb) {
-        iteration = maxIterations;
-    } else {
-        while (iteration < maxIterations) {
-            float zx_hi = zx.hi;
-            float zy_hi = zy.hi;
-            float mag_sq = zx_hi * zx_hi + zy_hi * zy_hi;
+    // Common map pixel to complex plane offset
+    float px = (float(gid.x) / float(width) - 0.5f) * scale * aspectRatio;
+    float py = (float(gid.y) / float(height) - 0.5f) * scale;
 
-            if (mag_sq > 256.0f) {
-                final_zx = zx_hi;
-                final_zy = zy_hi;
-                break;
+    if (useHighPrecision) {
+        // ==========================================================
+        // DOUBLE-DOUBLE PRECISION PATH (Deep Zoom)
+        // ==========================================================
+        
+        // Reconstruct center coordinates using double-float precision
+        dd_real x0 = floats_to_dd(centerX_hi, centerX_lo);
+        dd_real y0 = floats_to_dd(centerY_hi, centerY_lo);
+
+        x0 = dd_add(x0, dd_set(px));
+        y0 = dd_add(y0, dd_set(py));
+
+        dd_real cx_dd, cy_dd;
+        dd_real zx, zy;
+
+        if (juliaMode) {
+            zx = x0;
+            zy = y0;
+            cx_dd = dd_set(juliaCx);
+            cy_dd = dd_set(juliaCy);
+        } else {
+            zx = dd_set(0.0f);
+            zy = dd_set(0.0f);
+            cx_dd = x0;
+            cy_dd = y0;
+        }
+
+        // Quick cardioid/bulb check (only for Mandelbrot mode)
+        float cx = cx_dd.hi;
+        float cy = cy_dd.hi;
+        float q = (cx - 0.25f) * (cx - 0.25f) + cy * cy;
+        bool inCardioid = !juliaMode && (q * (q + (cx - 0.25f)) <= 0.25f * cy * cy);
+        bool inBulb = !juliaMode && ((cx + 1.0f) * (cx + 1.0f) + cy * cy <= 0.0625f);
+
+        if (inCardioid || inBulb) {
+            iteration = maxIterations;
+        } else {
+            while (iteration < maxIterations) {
+                float zx_hi = zx.hi;
+                float zy_hi = zy.hi;
+                float mag_sq = zx_hi * zx_hi + zy_hi * zy_hi;
+
+                if (mag_sq > 256.0f) {
+                    final_zx = zx_hi;
+                    final_zy = zy_hi;
+                    break;
+                }
+
+                // Distance estimation derivative: dz = 2*z*dz + 1
+                float new_dzx = 2.0f * (zx_hi * dzx - zy_hi * dzy) + 1.0f;
+                float new_dzy = 2.0f * (zx_hi * dzy + zy_hi * dzx);
+                dzx = new_dzx;
+                dzy = new_dzy;
+
+                // z = z^2 + c using double-float precision
+                dd_real zx_sq = dd_mul(zx, zx);
+                dd_real zy_sq = dd_mul(zy, zy);
+                dd_real zx_zy = dd_mul(zx, zy);
+
+                dd_real new_zx = dd_add(dd_sub(zx_sq, zy_sq), cx_dd);
+                dd_real new_zy = dd_add(dd_add(zx_zy, zx_zy), cy_dd);
+
+                zx = new_zx;
+                zy = new_zy;
+                iteration += 1.0f;
             }
-
-            // Distance estimation derivative: dz = 2*z*dz + 1
-            float new_dzx = 2.0f * (zx_hi * dzx - zy_hi * dzy) + 1.0f;
-            float new_dzy = 2.0f * (zx_hi * dzy + zy_hi * dzx);
-            dzx = new_dzx;
-            dzy = new_dzy;
-
-            // z = z^2 + c using double-float precision (Dekker arithmetic)
-            dd_real zx_sq = dd_mul(zx, zx);
-            dd_real zy_sq = dd_mul(zy, zy);
-            dd_real zx_zy = dd_mul(zx, zy);
-
-            dd_real new_zx = dd_add(dd_sub(zx_sq, zy_sq), cx_dd);
-            dd_real new_zy = dd_add(dd_add(zx_zy, zx_zy), cy_dd);
-
-            zx = new_zx;
-            zy = new_zy;
-            iteration += 1.0f;
+        }
+    } else {
+        // ==========================================================
+        // FLOAT PRECISION PATH (Fast for shallow zoom)
+        // ==========================================================
+        
+        float cx_f = centerX_hi + centerX_lo + px;
+        float cy_f = centerY_hi + centerY_lo + py;
+        
+        float zx, zy, cx, cy;
+        
+        if (juliaMode) {
+            zx = cx_f;
+            zy = cy_f;
+            cx = juliaCx;
+            cy = juliaCy;
+        } else {
+            zx = 0.0f;
+            zy = 0.0f;
+            cx = cx_f;
+            cy = cy_f;
+        }
+        
+        // Cardioid/Bulb check
+        float q = (cx - 0.25f) * (cx - 0.25f) + cy * cy;
+        bool inCardioid = !juliaMode && (q * (q + (cx - 0.25f)) <= 0.25f * cy * cy);
+        bool inBulb = !juliaMode && ((cx + 1.0f) * (cx + 1.0f) + cy * cy <= 0.0625f);
+        
+        if (inCardioid || inBulb) {
+            iteration = maxIterations;
+        } else {
+            while (iteration < maxIterations) {
+                float zx_sq = zx * zx;
+                float zy_sq = zy * zy;
+                
+                if (zx_sq + zy_sq > 256.0f) {
+                    final_zx = zx;
+                    final_zy = zy;
+                    break;
+                }
+                
+                // dz derivative
+                float new_dzx = 2.0f * (zx * dzx - zy * dzy) + 1.0f;
+                float new_dzy = 2.0f * (zx * dzy + zy * dzx);
+                dzx = new_dzx;
+                dzy = new_dzy;
+                
+                float new_zy = 2.0f * zx * zy + cy;
+                float new_zx = zx_sq - zy_sq + cx;
+                
+                zx = new_zx;
+                zy = new_zy;
+                iteration += 1.0f;
+            }
         }
     }
 
