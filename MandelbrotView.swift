@@ -245,7 +245,15 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
     }
 
     private func createTextureIfNeeded() {
-        let size = bounds.size
+        // Use drawableSize from mtkView if available (pixels), otherwise fallback to bounds * scale
+        let size: CGSize
+        if let mtkView = mtkView {
+             size = mtkView.drawableSize
+        } else {
+             let scale = window?.backingScaleFactor ?? 1.0
+             size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        }
+
         guard size.width > 0 && size.height > 0 else { return }
 
         if size == lastTextureSize && outputTexture != nil { return }
@@ -449,6 +457,11 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         encoder.setBytes(&params3, length: MemoryLayout<simd_float4>.size, index: 2)
         encoder.setBytes(&params4, length: MemoryLayout<simd_float4>.size, index: 3)
 
+        // Optimization: Use float precision when scale is large (> 0.003)
+        // Switch to double-double when zooming deep
+        var highPrecision: Float = scale < 0.003 ? 1.0 : 0.0
+        encoder.setBytes(&highPrecision, length: MemoryLayout<Float>.size, index: 4)
+
         // Dispatch threads
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         let threadGroups = MTLSize(
@@ -513,6 +526,9 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         encoder.setBytes(&params2, length: MemoryLayout<simd_float4>.size, index: 1)
         encoder.setBytes(&params3, length: MemoryLayout<simd_float4>.size, index: 2)
         encoder.setBytes(&params4, length: MemoryLayout<simd_float4>.size, index: 3)
+        
+        var highPrecision: Float = scale < 0.003 ? 1.0 : 0.0
+        encoder.setBytes(&highPrecision, length: MemoryLayout<Float>.size, index: 4)
 
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         let threadGroups = MTLSize(
