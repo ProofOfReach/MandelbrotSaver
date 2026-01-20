@@ -645,8 +645,141 @@ dd_real floats_to_dd(float hi, float lo) {
 }
 
 // ============================================================================
+// ORBIT KERNEL (GPU Reference Orbit Calculation)
+// ============================================================================
+// This computes the high-precision reference orbit entirely on the GPU
+// using double-double arithmetic. This avoids CPU-GPU synchronization
+// issues and race conditions.
+
+kernel void orbitKernel(
+    device float4 *referenceOrbit [[buffer(0)]], // Output buffer
+    constant float4 &center [[buffer(1)]],       // center_hi.xy, center_lo.xy
+    constant float4 &julia [[buffer(2)]],        // julia_c.xy, juliaMode, padding
+    constant int &maxIterations [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id > 0) return; // Single threaded calculation
+
+    // Unpack high-precision center
+    float2 cx_hi = center.xy;
+    float2 cx_lo = center.zw;
+    
+    // Construct dd_real center
+    dd_real cx_dd = floats_to_dd(cx_hi.x, cx_lo.x);
+    dd_real cy_dd = floats_to_dd(cx_hi.y, cx_lo.y);
+
+    // Initial Z
+    dd_real zr, zi;
+    // C value
+    dd_real cr, ci;
+
+    bool juliaMode = julia.z > 0.5f;
+    
+    if (juliaMode) {
+        // Julia: Z starts at pixel (here center), C is constant
+        zr = cx_dd;
+        zi = cy_dd;
+        cr = dd_set(julia.x);
+        ci = dd_set(julia.y);
+    } else {
+        // Mandelbrot: Z starts at 0, C is center
+        zr = dd_set(0.0f);
+        zi = dd_set(0.0f);
+        cr = cx_dd;
+        ci = cy_dd;
+    }
+
+    // Iterate
+    for (int i = 0; i < maxIterations; i++) {
+        // 1. Store truncated float value
+        float f_zr = zr.hi;
+        float f_zi = zi.hi;
+        
+        // 2. Compute exact next step (Double-Double)
+        dd_real zr2 = dd_mul(zr, zr);
+        dd_real zi2 = dd_mul(zi, zi);
+        dd_real zri = dd_mul(zr, zi);
+        
+        // Check escape
+        if (zr2.hi + zi2.hi > 4.0f) {
+            // Fill remaining
+            for (int j = i; j < maxIterations; j++) {
+                referenceOrbit[j] = float4(0.0f);
+            }
+            break;
+        }
+        
+        // Z_next = Z^2 + C
+        // zr_next = zr^2 - zi^2 + cr
+        // zi_next = 2*zr*zi + ci
+        dd_real next_zr = dd_add(dd_sub(zr2, zi2), cr);
+        dd_real next_zi = dd_add(dd_add(zri, zri), ci);
+        
+        // 3. Compute correction (Delta)
+        // Delta = (Z_stored^2 + C) - Z_stored_next
+        // Wait, the formula is: dz = 2*Z*dz + dz^2 + dc + Delta
+        // Where Delta = (Z_{n+1} - (Z_n^2 + C)) ... actually the reverse
+        // We want the GPU to compute: z_{n+1} = z_n^2 + c
+        // But we are approximating z_n with Z_n (float).
+        // So we need to add a correction term Delta to make the math work out.
+        // The perturbation iteration is:
+        // z = Z + dz
+        // z_{n+1} = z_n^2 + c
+        // (Z_{n+1} + dz_{n+1}) = (Z_n + dz_n)^2 + c
+        // Z_{n+1} + dz_{n+1} = Z_n^2 + 2*Z_n*dz_n + dz_n^2 + c
+        // dz_{n+1} = (Z_n^2 + c - Z_{n+1}) + 2*Z_n*dz_n + dz_n^2
+        //
+        // So Delta = (Z_n^2 + c) - Z_{n+1}
+        // Here Z_n is the stored float value 'f_zr'
+        // Z_{n+1} is the NEXT stored float value 'next_zr.hi' (approximately)
+        // No, Z_{n+1} in the formula refers to the reference orbit value used in the next step.
+        // Since we store the reference orbit in 'referenceOrbit[i]',
+        // referenceOrbit[i] is Z_n.
+        // referenceOrbit[i+1] is Z_{n+1}.
+        
+        // We calculate Delta based on the stored floats:
+        float f_next_zr = next_zr.hi;
+        float f_next_zi = next_zi.hi;
+        
+        // Compute (Z_n^2 + c) using floats
+        float f_zr2 = f_zr * f_zr;
+        float f_zi2 = f_zi * f_zi;
+        float f_iter_zr = f_zr2 - f_zi2 + cr.hi;
+        float f_iter_zi = 2.0f * f_zr * f_zi + ci.hi;
+        
+        // Delta = Float_Iter - Float_Next
+        float delta_r = f_iter_zr - f_next_zr;
+        float delta_i = f_iter_zi - f_next_zi;
+        
+        // Store: xy = Z (float), zw = Delta
+        referenceOrbit[i] = float4(f_zr, f_zi, delta_r, delta_i);
+        
+        // Advance
+        zr = next_zr;
+        zi = next_zi;
+    }
+}
+
+// ============================================================================
 // MAIN KERNEL
 // ============================================================================
+
+constant bool useHighPrecision [[function_constant(0)]];
+constant bool usePerturbation [[function_constant(1)]];
+
+// Complex math helpers for float2
+inline float2 cmul(float2 a, float2 b) {
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+inline float2 csqr(float2 a) {
+    return float2(a.x * a.x - a.y * a.y, 2.0f * a.x * a.y);
+}
+
+// Convert double2 to float2 (downcasting)
+inline float2 to_float2(float2 val) { return val; } 
+// If we receive double2 (vector_double2), we can cast it
+// Metal shading language 2.3+ supports double
 
 kernel void mandelbrotKernel(
     texture2d<float, access::write> output [[texture(0)]],
@@ -654,7 +787,7 @@ kernel void mandelbrotKernel(
     constant float4 &params2 [[buffer(1)]],     // colorOffset, aspectRatio, paletteIndex, paletteMix
     constant float4 &params3 [[buffer(2)]],     // centerX_lo, centerY_lo, shadingMode, time
     constant float4 &params4 [[buffer(3)]],     // opacity, juliaMode, juliaCx, juliaCy
-    constant float &highPrecisionFlag [[buffer(4)]], // Optimization flag
+    device float4 *referenceOrbit [[buffer(5)]], // Reference orbit + Correction (Float4)
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint width = output.get_width();
@@ -684,8 +817,6 @@ kernel void mandelbrotKernel(
     float juliaCx = params4.z;
     float juliaCy = params4.w;
 
-    bool useHighPrecision = highPrecisionFlag > 0.5f;
-
     // Output variables
     float iteration = 0.0f;
     float dzx = 0.0f;
@@ -694,10 +825,110 @@ kernel void mandelbrotKernel(
     float final_zy = 0.0f;
 
     // Common map pixel to complex plane offset
+    // In perturbation mode, this is Delta C (pixel offset from center)
+    // In standard mode, this is added to center
     float px = (float(gid.x) / float(width) - 0.5f) * scale * aspectRatio;
     float py = (float(gid.y) / float(height) - 0.5f) * scale;
 
-    if (useHighPrecision) {
+    if (usePerturbation) {
+        // ==========================================================
+        // PERTURBATION THEORY PATH (Deep Zoom with Float Precision)
+        // ==========================================================
+        
+        // Delta C is just the pixel offset (px, py)
+        float2 dc = float2(px, py);
+        float2 dz = float2(0.0f, 0.0f);
+        
+        // Julia Set Perturbation
+        if (juliaMode) {
+            dz = float2(px, py);
+            dc = float2(0.0f, 0.0f); 
+        } 
+        
+        // Loop using reference orbit Z_n
+        // dz_{n+1} = 2*Z_n*dz_n + dz_n^2 + dc
+        
+        // Iterate
+        for (int i = 0; i < int(maxIterations); i++) {
+            // Read reference orbit (xy) and correction term (zw)
+            float4 ref = referenceOrbit[i];
+            float2 Z = ref.xy;
+            float2 correction = ref.zw;
+            
+            // Check escape: |Z + dz|^2 > 4.0
+            float2 z = Z + dz;
+            float mag_sq = dot(z, z);
+            
+            if (mag_sq > 4.0f) {
+                final_zx = z.x;
+                final_zy = z.y;
+                break;
+            }
+            
+            // Periodicity Checking (Cardioid / Bulb check covers main parts, this covers deep minis)
+            // Save state every P iterations. If we return to it, we are in a cycle.
+            float2 z_saved = float2(0.0f);
+            int period = 20;
+            int period_counter = 0;
+            
+            // Perturbation formula
+            // dz = 2*Z*dz + dz^2 + dc - correction
+            
+            // Iterate
+            for (int i = 0; i < int(maxIterations); i++) {
+                // Read reference orbit (xy) and correction term (zw)
+                float4 ref = referenceOrbit[i];
+                float2 Z = ref.xy;
+                float2 correction = ref.zw;
+                
+                // Check escape: |Z + dz|^2 > 4.0
+                float2 z = Z + dz;
+                float mag_sq = dot(z, z);
+                
+                if (mag_sq > 4.0f) {
+                    final_zx = z.x;
+                    final_zy = z.y;
+                    break;
+                }
+                
+            // Periodicity check
+            // We check if z is close to z_saved
+            float2 diff = z - z_saved;
+            if (dot(diff, diff) < 1e-12f) { // Epsilon for float cycle detection
+                // Cycle detected! We are inside the set.
+                iteration = maxIterations;
+                final_zx = z.x;
+                final_zy = z.y;
+                break;
+            }
+            
+            // Update period checker
+            period_counter++;
+            if (period_counter >= period) {
+                z_saved = z;
+                period_counter = 0;
+                period *= 2; // Increase period to catch complex cycles
+                if (period > 200) period = 200; // Cap period check
+            }
+            
+            // Perturbation formula
+            // 2*Z*dz
+            float2 term1 = cmul(2.0f * Z, dz);
+            // dz^2
+            float2 term2 = csqr(dz);
+            
+            dz = term1 + term2 + dc + correction;
+            
+            // Update derivative for distance estimation (shading)
+            float new_dzx = 2.0f * (z.x * dzx - z.y * dzy) + 1.0f;
+            float new_dzy = 2.0f * (z.x * dzy + z.y * dzx);
+            dzx = new_dzx;
+            dzy = new_dzy;
+            
+            iteration += 1.0f;
+        } // End perturbation loop
+    } else if (useHighPrecision) {
+    } else if (useHighPrecision) {
         // ==========================================================
         // DOUBLE-DOUBLE PRECISION PATH (Deep Zoom)
         // ==========================================================
@@ -818,8 +1049,6 @@ kernel void mandelbrotKernel(
                 iteration += 1.0f;
             }
         }
-    }
-
     // Coloring
     float3 color;
 

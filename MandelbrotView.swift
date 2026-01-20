@@ -20,8 +20,13 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
     // MARK: - Metal Properties
     private var metalDevice: MTLDevice?
     private var commandQueue: MTLCommandQueue?
-    private var computePipeline: MTLComputePipelineState?
+    private var computePipelineFloat: MTLComputePipelineState?
+    private var computePipelineHighPrecision: MTLComputePipelineState?
+    private var computePipelineOrbit: MTLComputePipelineState?
+    private var computePipelinePerturbation: MTLComputePipelineState?
     private var outputTexture: MTLTexture?
+    private var referenceOrbitBuffer: MTLBuffer?
+    private var maxOrbitIterations: Int = 0
 
     // MARK: - P3 Wide Gamut Rendering
     private var mtkView: MTKView?
@@ -41,18 +46,18 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
     private let fadeSpeed: Float = 0.02
 
     // MARK: - Zoom State (using Double for precision)
-    private var centerX: Double = -0.5
-    private var centerY: Double = 0.0
-    private var scale: Double = 3.0
+    private var centerX: DoubleDouble = DoubleDouble(-0.5)
+    private var centerY: DoubleDouble = DoubleDouble(0.0)
+    private var scale: DoubleDouble = DoubleDouble(3.0)
 
     // Target for smooth animation
-    private var targetCenterX: Double = -0.5
-    private var targetCenterY: Double = 0.0
-    private var targetScale: Double = 1e-13
+    private var targetCenterX: DoubleDouble = DoubleDouble(-0.5)
+    private var targetCenterY: DoubleDouble = DoubleDouble(0.0)
+    private var targetScale: DoubleDouble = DoubleDouble(1e-13)
 
     // Animation parameters (loaded from preferences)
-    private var zoomSpeed: Double = 0.990
-    private let panSpeed: Double = 0.015
+    private var zoomSpeed: DoubleDouble = DoubleDouble(0.990)
+    private let panSpeed: DoubleDouble = DoubleDouble(0.015)
 
     // Visual effects (partially loaded from preferences)
     private var colorOffset: Float = 0.0
@@ -99,25 +104,37 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
     ]
 
     // =========================================================================
-    // INTERESTING ZOOM TARGETS - Curated beautiful locations only
-    // Reset 15% earlier (1e-5) to stay crisp
+    // INTERESTING ZOOM TARGETS - High Precision Coordinates
+    // These points lie on the boundary of the set, allowing for deep zooms (10^-14)
+    // without landing in empty black space.
     // =========================================================================
-    private let interestingPoints: [(x: Double, y: Double, minScale: Double, name: String)] = [
-        // Classic spirals - always beautiful
-        (-0.74529, 0.113075, 1e-5, "Seahorse Valley"),
-        (-1.25066, 0.02012, 1e-5, "Elephant Valley"),
-        (0.360240443437614, -0.641313061064803, 1e-5, "Triple Spiral"),
-
-        // Mini-Mandelbrots - guaranteed beautiful
-        (-1.401155, 0.0, 1e-5, "Western Mini"),
-        (-0.761574, -0.0847596, 1e-5, "Mini at Period-3"),
-
-        // Seahorse details
-        (-0.745289, 0.113075, 1e-5, "Seahorse Detail"),
-        (-0.75, 0.1, 1e-5, "Classic Seahorse"),
-
-        // Clean spirals
-        (-0.235125, 0.827215, 1e-5, "Julia Spiral"),
+    private let interestingPoints: [(x: String, y: String, minScale: String, name: String)] = [
+        // Seahorse Valley Deep Zoom
+        ("-0.743643887037158704752191506114774", "0.131825904205311970493132056385139", "1e-25", "Seahorse Deep"),
+        
+        // Scepter Valley
+        ("-1.25066667543", "0.020122047495", "1e-10", "Scepter Valley"),
+        
+        // Quad-Spiral Valley
+        ("0.276229045121426", "-0.009120804311029", "1e-14", "Quad-Spiral"),
+        
+        // Mini-Mandelbrot in Elephant Valley
+        ("-1.768778833", "0.004238705", "1e-9", "Elephant Mini"),
+        
+        // Triple Spiral (Shell)
+        ("-0.749767676767", "0.020113113113", "1e-11", "Triple Spiral"),
+        
+        // Sunburst
+        ("-0.16070135", "1.0375665", "1e-7", "Sunburst"),
+        
+        // Starfish
+        ("-0.373333333", "-0.655", "1e-4", "Starfish"),
+        
+        // Deep Spirals
+        ("-0.74719017772", "-0.07693999233", "1e-11", "Deep Spirals"),
+        
+        // Julia Morph Region
+        ("-0.19932130283", "-1.10099687926", "1e-11", "Julia Morph")
     ]
 
     private var currentTargetIndex: Int = 0
@@ -142,10 +159,9 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         self.animationTimeInterval = 1.0 / 60.0
     }
 
-    /// Load preferences from ScreenSaverDefaults
     private func loadPreferences() {
         let prefs = Preferences.shared
-        zoomSpeed = prefs.zoomSpeed
+        zoomSpeed = DoubleDouble(prefs.zoomSpeed)
         currentPalette = prefs.paletteIndex
         autoCyclePalettes = prefs.autoCyclePalettes
         shadingMode = prefs.shadingMode
@@ -168,15 +184,45 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
             return
         }
 
-        guard let kernelFunction = library.makeFunction(name: "mandelbrotKernel") else {
-            NSLog("MandelbrotSaver: Failed to find kernel function")
-            return
-        }
-
         do {
-            computePipeline = try device.makeComputePipelineState(function: kernelFunction)
+            // Create pipeline state for standard float precision (fast)
+            let floatConstants = MTLFunctionConstantValues()
+            var useHighPrecision = false
+            floatConstants.setConstantValue(&useHighPrecision, type: .bool, index: 0)
+            
+            let floatPipelineDesc = MTLComputePipelineDescriptor()
+            floatPipelineDesc.computeFunction = try library.makeFunction(name: "mandelbrotKernel", constantValues: floatConstants)
+            computePipelineFloat = try device.makeComputePipelineState(descriptor: floatPipelineDesc, options: [], reflection: nil)
+            
+            // Create pipeline state for double-double precision (deep zoom)
+            let highPrecConstants = MTLFunctionConstantValues()
+            useHighPrecision = true
+            highPrecConstants.setConstantValue(&useHighPrecision, type: .bool, index: 0)
+            
+            let highPrecPipelineDesc = MTLComputePipelineDescriptor()
+            highPrecPipelineDesc.computeFunction = try library.makeFunction(name: "mandelbrotKernel", constantValues: highPrecConstants)
+            computePipelineHighPrecision = try device.makeComputePipelineState(descriptor: highPrecPipelineDesc, options: [], reflection: nil)
+            
+            // Create pipeline state for Perturbation Theory (Deep Zoom)
+            // Reuses the same kernel but with function constant index 1 set to true
+            let perturbConstants = MTLFunctionConstantValues()
+            var usePerturbation = true
+            // Index 0: HighPrecision (Double-Double) - OFF (we use Perturbation instead)
+            // Index 1: Perturbation - ON
+            var useHP = false
+            perturbConstants.setConstantValue(&useHP, type: .bool, index: 0)
+            perturbConstants.setConstantValue(&usePerturbation, type: .bool, index: 1)
+            
+            let perturbPipelineDesc = MTLComputePipelineDescriptor()
+            perturbPipelineDesc.computeFunction = try library.makeFunction(name: "mandelbrotKernel", constantValues: perturbConstants)
+            computePipelinePerturbation = try device.makeComputePipelineState(descriptor: perturbPipelineDesc, options: [], reflection: nil)
+            
+            // Create pipeline state for Orbit Calculation (GPU)
+            if let orbitFunction = library.makeFunction(name: "orbitKernel") {
+                computePipelineOrbit = try device.makeComputePipelineState(function: orbitFunction)
+            }
         } catch {
-            NSLog("MandelbrotSaver: Failed to create compute pipeline: \(error)")
+            NSLog("MandelbrotSaver: Failed to create compute pipelines: \(error)")
         }
 
         // Setup MTKView for P3 Wide Gamut rendering
@@ -195,6 +241,11 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         view.autoresizingMask = [.width, .height]
         view.isPaused = true  // We control rendering via animateOneFrame
         view.enableSetNeedsDisplay = false
+        
+        // PERFORMANCE: Disable Retina scaling (render at 1x points)
+        // This reduces GPU load by 4x on Retina displays while maintaining acceptable quality for fractals
+        view.wantsLayer = true
+        view.layer?.contentsScale = 1.0
 
         // Configure for P3 Wide Gamut with 16-bit float precision
         view.colorPixelFormat = .rgba16Float
@@ -250,8 +301,8 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         if let mtkView = mtkView {
              size = mtkView.drawableSize
         } else {
-             let scale = window?.backingScaleFactor ?? 1.0
-             size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+             // Fallback: Force 1.0 scale if MTKView isn't ready
+             size = bounds.size
         }
 
         guard size.width > 0 && size.height > 0 else { return }
@@ -283,17 +334,20 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
 
         currentTargetIndex = newIndex
         let target = interestingPoints[currentTargetIndex]
-        targetCenterX = target.x
-        targetCenterY = target.y
-        targetScale = target.minScale
+        targetCenterX = DoubleDouble(target.x)
+        targetCenterY = DoubleDouble(target.y)
+        targetScale = DoubleDouble(target.minScale)
 
         // Reset to initial view
-        centerX = -0.5
-        centerY = 0.0
-        scale = 3.0
+        centerX = DoubleDouble(-0.5)
+        centerY = DoubleDouble(0.0)
+        scale = DoubleDouble(3.0)
 
         zoomCount += 1
 
+        // Reset orbit iterations to safe default
+        maxOrbitIterations = 0
+        
         // Alternate between Mandelbrot and Julia every 4 zooms (if Julia enabled)
         if juliaEnabled && zoomCount % 4 == 0 {
             juliaMode = !juliaMode
@@ -304,11 +358,11 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
                 juliaCx = juliaC.cx
                 juliaCy = juliaC.cy
                 // For Julia sets, we start centered at origin
-                centerX = 0.0
-                centerY = 0.0
-                targetCenterX = 0.0
-                targetCenterY = 0.0
-                targetScale = 3e-5  // Julia sets don't need as deep zoom
+                centerX = DoubleDouble(0.0)
+                centerY = DoubleDouble(0.0)
+                targetCenterX = DoubleDouble(0.0)
+                targetCenterY = DoubleDouble(0.0)
+                targetScale = DoubleDouble(3e-5)  // Julia sets don't need as deep zoom
             }
         } else if !juliaEnabled {
             juliaMode = false  // Ensure Julia is off if disabled
@@ -325,16 +379,17 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         switch transitionState {
         case .zooming:
             // Exponential zoom
-            scale *= zoomSpeed
+            scale = scale * zoomSpeed
 
             // Smooth pan toward target using ease-out
             let dx = targetCenterX - centerX
             let dy = targetCenterY - centerY
-            centerX += dx * panSpeed
-            centerY += dy * panSpeed
+            centerX = centerX + (dx * panSpeed)
+            centerY = centerY + (dy * panSpeed)
 
             // When we've zoomed deep enough, start fading out
-            if scale < targetScale * 2.0 {
+            // Use hi part for simple comparison
+            if scale.hi < targetScale.hi * 2.0 {
                 transitionState = .fadingOut
             }
 
@@ -397,33 +452,140 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         }
     }
 
+    // MARK: - Perturbation Theory Helper
+    
+    private func updateReferenceOrbit(maxIterations: Int) {
+        guard let device = metalDevice else { return }
+        
+        // Use SIMD4<Float> (16 bytes)
+        // .xy = Reference Orbit (Float approximation)
+        // .zw = Correction term (Delta) to account for float truncation
+        let bufferLength = maxIterations * MemoryLayout<SIMD4<Float>>.size
+        
+        if referenceOrbitBuffer == nil || referenceOrbitBuffer!.length < bufferLength {
+            referenceOrbitBuffer = device.makeBuffer(length: bufferLength, options: .storageModeShared)
+            maxOrbitIterations = maxIterations
+        }
+        
+        guard let buffer = referenceOrbitBuffer else { return }
+        let pointer = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: maxIterations)
+        
+        // Use DoubleDouble for calculation
+        // Mandelbrot: Z starts at 0. C is center.
+        // Julia: Z starts at center. C is constant.
+        
+        let cx = centerX
+        let cy = centerY
+        let jcx = DoubleDouble(juliaCx)
+        let jcy = DoubleDouble(juliaCy)
+        
+        var cur_zr: DoubleDouble
+        var cur_zi: DoubleDouble
+        let c_real: DoubleDouble
+        let c_imag: DoubleDouble
+        
+        if juliaMode {
+            cur_zr = cx
+            cur_zi = cy
+            c_real = jcx
+            c_imag = jcy
+        } else {
+            cur_zr = DoubleDouble(0.0)
+            cur_zi = DoubleDouble(0.0)
+            c_real = cx
+            c_imag = cy
+        }
+        
+        for i in 0..<maxIterations {
+            // 1. Store current truncated float value
+            let f_zr = Float(cur_zr.hi)
+            let f_zi = Float(cur_zi.hi)
+            
+            // 2. Calculate next exact value (DoubleDouble)
+            let zr2 = cur_zr * cur_zr
+            let zi2 = cur_zi * cur_zi
+            let two = DoubleDouble(2.0)
+            
+            // Check escape (using hi part for speed)
+            if zr2.hi + zi2.hi > 4.0 {
+                // Fill remaining
+                for j in i..<maxIterations {
+                    pointer[j] = SIMD4<Float>(0, 0, 0, 0)
+                }
+                break
+            }
+            
+            let next_zi = (cur_zr * cur_zi * two) + c_imag
+            let next_zr = (zr2 - zi2) + c_real
+            
+            // 3. Calculate Correction Term (Drift)
+            // Delta = (Z_stored^2 + c) - Z_stored_next
+            // We need the next stored value to compute the difference
+            let f_next_zr = Float(next_zr.hi)
+            let f_next_zi = Float(next_zi.hi)
+            
+            // Calculate what the iteration WOULD be if we used the float values
+            let f_zr2 = f_zr * f_zr
+            let f_zi2 = f_zi * f_zi
+            let f_iter_zr = f_zr2 - f_zi2 + Float(c_real.hi)
+            let f_iter_zi = 2.0 * f_zr * f_zi + Float(c_imag.hi)
+            
+            let delta_r = f_iter_zr - f_next_zr
+            let delta_i = f_iter_zi - f_next_zi
+            
+            pointer[i] = SIMD4<Float>(f_zr, f_zi, delta_r, delta_i)
+            
+            // Advance exact orbit
+            cur_zr = next_zr
+            cur_zi = next_zi
+        }
+    }
+
     /// Main rendering function - called from MTKViewDelegate
     private func renderFrame() {
         createTextureIfNeeded()
 
+        // Smart auto-iteration: more iterations when zoomed deep
+        // With perturbation, we can go very deep
+        let zoomDepth = log10(3.0 / scale.hi)
+        let maxIterations: Float = min(Float(zoomDepth * 80 + 200), 5000)
+        let iterCount = Int(maxIterations)
+
+        // Select Pipeline
+        let usePerturbation = scale.hi < 0.003
+        let pipeline = usePerturbation ? computePipelinePerturbation : computePipelineFloat
+
         guard let commandQueue = commandQueue,
-              let pipeline = computePipeline,
+              let pipeline = pipeline,
               let texture = outputTexture,
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
         }
-
-        // Smart auto-iteration: more iterations when zoomed deep
-        // With double-double precision, we can support 10^15 zoom
-        let zoomDepth = log10(3.0 / scale)
-        let maxIterations: Float = min(Float(zoomDepth * 80 + 200), 5000)
+        
+        // Update Reference Orbit on CPU (using DoubleDouble)
+        if usePerturbation {
+            updateReferenceOrbit(maxIterations: iterCount)
+        }
+        
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return
+        }
+        
+        // ... (rest of function)
 
         // Split center coordinates into hi/lo parts for double-double precision
         // Using the asFloatPair extension for clean encoding
-        let centerXPair = centerX.asFloatPair
-        let centerYPair = centerY.asFloatPair
+        // Note: centerX is now DoubleDouble, so we take .hi and .lo directly
+        let centerX_hi = Float(centerX.hi)
+        let centerX_lo = Float(centerX.lo)
+        let centerY_hi = Float(centerY.hi)
+        let centerY_lo = Float(centerY.lo)
 
         // Pack parameters
         var params = simd_float4(
-            centerXPair.hi,
-            centerYPair.hi,
-            Float(scale),
+            centerX_hi,
+            centerY_hi,
+            Float(scale.hi),
             maxIterations
         )
 
@@ -436,8 +598,8 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         )
 
         var params3 = simd_float4(
-            centerXPair.lo,
-            centerYPair.lo,
+            centerX_lo,
+            centerY_lo,
             Float(shadingMode),
             time
         )
@@ -456,11 +618,10 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         encoder.setBytes(&params2, length: MemoryLayout<simd_float4>.size, index: 1)
         encoder.setBytes(&params3, length: MemoryLayout<simd_float4>.size, index: 2)
         encoder.setBytes(&params4, length: MemoryLayout<simd_float4>.size, index: 3)
-
-        // Optimization: Use float precision when scale is large (> 0.003)
-        // Switch to double-double when zooming deep
-        var highPrecision: Float = scale < 0.003 ? 1.0 : 0.0
-        encoder.setBytes(&highPrecision, length: MemoryLayout<Float>.size, index: 4)
+        
+        if usePerturbation, let refBuffer = referenceOrbitBuffer {
+            encoder.setBuffer(refBuffer, offset: 0, index: 5)
+        }
 
         // Dispatch threads
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
@@ -501,23 +662,37 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
     private func renderFrameFallback() {
         createTextureIfNeeded()
 
+        let zoomDepth = log10(3.0 / scale.hi)
+        let maxIterations: Float = min(Float(zoomDepth * 80 + 200), 5000)
+        let iterCount = Int(maxIterations)
+
+        let usePerturbation = scale.hi < 0.003
+        let pipeline = usePerturbation ? computePipelinePerturbation : computePipelineFloat
+
         guard let commandQueue = commandQueue,
-              let pipeline = computePipeline,
+              let pipeline = pipeline,
               let texture = outputTexture,
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return
+        }
+        
+        if usePerturbation {
+            updateReferenceOrbit(maxIterations: iterCount)
+        }
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             return
         }
 
-        let zoomDepth = log10(3.0 / scale)
-        let maxIterations: Float = min(Float(zoomDepth * 80 + 200), 5000)
-        let centerXPair = centerX.asFloatPair
-        let centerYPair = centerY.asFloatPair
+        let centerX_hi = Float(centerX.hi)
+        let centerX_lo = Float(centerX.lo)
+        let centerY_hi = Float(centerY.hi)
+        let centerY_lo = Float(centerY.lo)
 
-        var params = simd_float4(centerXPair.hi, centerYPair.hi, Float(scale), maxIterations)
+        var params = simd_float4(centerX_hi, centerY_hi, Float(scale.hi), maxIterations)
         let aspectRatio = Float(bounds.width / bounds.height)
         var params2 = simd_float4(colorOffset, aspectRatio, Float(currentPalette), paletteMix)
-        var params3 = simd_float4(centerXPair.lo, centerYPair.lo, Float(shadingMode), time)
+        var params3 = simd_float4(centerX_lo, centerY_lo, Float(shadingMode), time)
         var params4 = simd_float4(transitionOpacity, juliaMode ? 1.0 : 0.0, Float(juliaCx), Float(juliaCy))
 
         encoder.setComputePipelineState(pipeline)
@@ -527,9 +702,10 @@ class MandelbrotView: ScreenSaverView, MTKViewDelegate {
         encoder.setBytes(&params3, length: MemoryLayout<simd_float4>.size, index: 2)
         encoder.setBytes(&params4, length: MemoryLayout<simd_float4>.size, index: 3)
         
-        var highPrecision: Float = scale < 0.003 ? 1.0 : 0.0
-        encoder.setBytes(&highPrecision, length: MemoryLayout<Float>.size, index: 4)
-
+        if usePerturbation, let refBuffer = referenceOrbitBuffer {
+            encoder.setBuffer(refBuffer, offset: 0, index: 5)
+        }
+        
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         let threadGroups = MTLSize(
             width: (texture.width + threadGroupSize.width - 1) / threadGroupSize.width,
