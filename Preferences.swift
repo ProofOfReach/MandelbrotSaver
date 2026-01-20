@@ -48,13 +48,13 @@ final class Preferences {
         }
     }
 
-    /// Current palette index (0-8 for standard + P3 palettes)
+    /// Current palette index (0-23)
     var paletteIndex: Int {
         get {
             return defaults?.integer(forKey: Keys.paletteIndex) ?? Defaults.paletteIndex
         }
         set {
-            let clamped = max(0, min(8, newValue))
+            let clamped = max(0, min(23, newValue))
             defaults?.set(clamped, forKey: Keys.paletteIndex)
             defaults?.synchronize()
         }
@@ -153,9 +153,24 @@ final class Preferences {
         "Electric",
         "Sunset",
         "Glacial",
-        "P3 Electric (Wide Gamut)",
-        "P3 Fire (Wide Gamut)",
-        "P3 Ocean (Wide Gamut)"
+        "Rainbow",
+        "Plasma",
+        "Lava",
+        "Forest",
+        "Midnight",
+        "Aurora",
+        "Copper",
+        "Emerald",
+        "Amethyst",
+        "Gold",
+        "Silver",
+        "Bronze",
+        "Neon",
+        "Vapor",
+        "Thermal",
+        "Spectrum",
+        "Monochrome",
+        "Candy"
     ]
 
     /// Shading mode names for UI display

@@ -55,6 +55,7 @@ rm Mandelbrot.air
 # Compile Swift code into a dynamic library
 echo "🔧 Compiling Swift code..."
 swiftc \
+    -O \
     -target arm64-apple-macosx12.0 \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
     -emit-library \
@@ -68,6 +69,7 @@ swiftc \
     -framework AppKit \
     -framework Foundation \
     Preferences.swift \
+    DoubleDouble.swift \
     ConfigureSheetController.swift \
     MandelbrotView.swift
 
