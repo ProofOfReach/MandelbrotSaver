@@ -9,6 +9,7 @@ BUNDLE_DIR="${BUNDLE_NAME}.saver"
 CONTENTS_DIR="${BUNDLE_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
+MODULE_CACHE_DIR="${TMPDIR:-/tmp}/mandelbrot-module-cache"
 
 # Check for Xcode (required for Metal compiler)
 if [ -d "/Applications/Xcode.app" ]; then
@@ -34,6 +35,7 @@ rm -rf "$BUNDLE_DIR"
 # Create bundle structure
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
+mkdir -p "$MODULE_CACHE_DIR"
 
 # Copy Info.plist
 cp Info.plist "${CONTENTS_DIR}/"
@@ -48,7 +50,7 @@ fi
 
 # Compile Metal shader to .air then to .metallib
 echo "📐 Compiling Metal shader..."
-xcrun -sdk macosx metal -c Mandelbrot.metal -o Mandelbrot.air
+xcrun -sdk macosx metal -fmodules-cache-path="$MODULE_CACHE_DIR" -c Mandelbrot.metal -o Mandelbrot.air
 xcrun -sdk macosx metallib Mandelbrot.air -o "${RESOURCES_DIR}/default.metallib"
 rm Mandelbrot.air
 
@@ -56,6 +58,7 @@ rm Mandelbrot.air
 echo "🔧 Compiling Swift code..."
 swiftc \
     -O \
+    -module-cache-path "$MODULE_CACHE_DIR" \
     -target arm64-apple-macosx12.0 \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
     -emit-library \
@@ -65,13 +68,16 @@ swiftc \
     -Xlinker -install_name -Xlinker "@rpath/${BUNDLE_NAME}" \
     -framework ScreenSaver \
     -framework Metal \
-    -framework MetalKit \
     -framework AppKit \
     -framework Foundation \
     Preferences.swift \
     DoubleDouble.swift \
     ConfigureSheetController.swift \
     MandelbrotView.swift
+
+# Ad-hoc sign so macOS allows Metal access in sandboxed screensaver process
+echo "🔏 Code signing..."
+codesign --force --sign - "${BUNDLE_DIR}"
 
 echo "✅ Build complete: ${BUNDLE_DIR}"
 

@@ -51,8 +51,7 @@ struct DoubleDouble: Equatable, CustomStringConvertible {
         let e = (lhs.hi - (s1 - v)) + (rhs.hi - v)
         
         let s2 = lhs.lo + rhs.lo
-        let s = s1 + e + s2 // Approximate sum
-        
+
         // Renormalize (roughly)
         return twoSum(s1, e + s2)
     }
@@ -62,14 +61,11 @@ struct DoubleDouble: Equatable, CustomStringConvertible {
     }
     
     static func * (lhs: DoubleDouble, rhs: DoubleDouble) -> DoubleDouble {
-        // p = lhs.hi * rhs.hi
-        // e = fma(lhs.hi, rhs.hi, -p)
-        // We don't have direct FMA in pure Swift Double easily without 'advanced' imports or C
-        // Standard multiplication approximation:
-        let p = lhs.hi * rhs.hi
-        // Cross terms
-        let c = lhs.hi * rhs.lo + lhs.lo * rhs.hi
-        return DoubleDouble(p, c) // Simplified, assumes p is dominant
+        // Dekker multiplication with FMA
+        let p1 = lhs.hi * rhs.hi
+        let e1 = Foundation.fma(lhs.hi, rhs.hi, -p1)
+        let p2 = e1 + lhs.hi * rhs.lo + lhs.lo * rhs.hi
+        return twoSum(p1, p2)
     }
     
     static func * (lhs: DoubleDouble, rhs: Double) -> DoubleDouble {
@@ -82,26 +78,5 @@ struct DoubleDouble: Equatable, CustomStringConvertible {
         let v = s - a
         let e = (a - (s - v)) + (b - v)
         return DoubleDouble(s, e)
-    }
-}
-
-// MARK: - Complex DoubleDouble
-
-struct ComplexDD {
-    var x: DoubleDouble
-    var y: DoubleDouble
-    
-    static func + (lhs: ComplexDD, rhs: ComplexDD) -> ComplexDD {
-        return ComplexDD(x: lhs.x + rhs.x, y: lhs.y + rhs.y)
-    }
-    
-    static func sqr(_ z: ComplexDD) -> ComplexDD {
-        // (x + iy)^2 = x^2 - y^2 + 2ixy
-        let x2 = z.x * z.x
-        let y2 = z.y * z.y
-        let two = DoubleDouble(2.0)
-        let xy2 = (z.x * z.y) * two
-        
-        return ComplexDD(x: x2 - y2, y: xy2)
     }
 }
