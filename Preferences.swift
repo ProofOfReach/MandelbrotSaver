@@ -22,7 +22,7 @@ final class Preferences {
     // MARK: - Defaults
 
     private enum Defaults {
-        static let zoomSpeed: Double = 0.990
+        static let zoomSpeed: Double = 0.985
         static let paletteIndex: Int = 0
         static let autoCyclePalettes: Bool = true
         static let shadingMode: Int = 0
@@ -34,17 +34,16 @@ final class Preferences {
 
     private let defaults: ScreenSaverDefaults?
 
-    /// Zoom speed (0.98 = faster, 0.995 = slower)
-    /// Range: 0.98 to 0.995
+    /// Zoom speed (0.975 = faster, 0.995 = slower)
+    /// Range: 0.975 to 0.995
     var zoomSpeed: Double {
         get {
             let value = defaults?.double(forKey: Keys.zoomSpeed) ?? 0
             return value > 0 ? value : Defaults.zoomSpeed
         }
         set {
-            let clamped = max(0.98, min(0.995, newValue))
+            let clamped = max(0.975, min(0.995, newValue))
             defaults?.set(clamped, forKey: Keys.zoomSpeed)
-            defaults?.synchronize()
         }
     }
 
@@ -56,7 +55,6 @@ final class Preferences {
         set {
             let clamped = max(0, min(23, newValue))
             defaults?.set(clamped, forKey: Keys.paletteIndex)
-            defaults?.synchronize()
         }
     }
 
@@ -71,7 +69,6 @@ final class Preferences {
         }
         set {
             defaults?.set(newValue, forKey: Keys.autoCyclePalettes)
-            defaults?.synchronize()
         }
     }
 
@@ -83,7 +80,6 @@ final class Preferences {
         set {
             let clamped = max(0, min(3, newValue))
             defaults?.set(clamped, forKey: Keys.shadingMode)
-            defaults?.synchronize()
         }
     }
 
@@ -97,7 +93,6 @@ final class Preferences {
         }
         set {
             defaults?.set(newValue, forKey: Keys.juliaMode)
-            defaults?.synchronize()
         }
     }
 
@@ -111,7 +106,6 @@ final class Preferences {
         }
         set {
             defaults?.set(newValue, forKey: Keys.enableAntialiasing)
-            defaults?.synchronize()
         }
     }
 

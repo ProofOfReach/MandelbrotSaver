@@ -22,6 +22,7 @@ final class ConfigureSheetController: NSObject {
 
     func configureSheet() -> NSWindow {
         if let existingWindow = window {
+            loadPreferences()
             return existingWindow
         }
 
@@ -230,8 +231,8 @@ final class ConfigureSheetController: NSObject {
 
     // MARK: - Preferences
 
-    // Slider mapping: 0 (slow) = 0.997, 1 (fast) = 0.975
-    private let slowestSpeed = 0.997
+    // Slider mapping: 0 (slow) = 0.995, 1 (fast) = 0.98
+    private let slowestSpeed = 0.995
     private let fastestSpeed = 0.975
 
     private func sliderToSpeed(_ slider: Double) -> Double {
