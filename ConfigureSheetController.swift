@@ -15,24 +15,21 @@ final class ConfigureSheetController: NSObject {
     private var zoomSpeedLabel: NSTextField!
     private var palettePopup: NSPopUpButton!
     private var autoCycleCheckbox: NSButton!
+    private var visualQualityPopup: NSPopUpButton!
     private var shadingModePopup: NSPopUpButton!
     private var juliaModeCheckbox: NSButton!
 
     // MARK: - Window Creation
 
     func configureSheet() -> NSWindow {
-        if let existingWindow = window {
-            loadPreferences()
-            return existingWindow
-        }
-
         let sheet = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 320),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 360),
             styleMask: [.titled],
             backing: .buffered,
             defer: true
         )
         sheet.title = "Mandelbrot Screensaver Options"
+        sheet.isReleasedWhenClosed = false
 
         let contentView = createContentView()
         sheet.contentView = contentView
@@ -63,6 +60,9 @@ final class ConfigureSheetController: NSObject {
         let paletteSection = createPaletteSection()
         mainStack.addArrangedSubview(paletteSection)
 
+        let qualitySection = createQualitySection()
+        mainStack.addArrangedSubview(qualitySection)
+
         // Shading Section
         let shadingSection = createShadingSection()
         mainStack.addArrangedSubview(shadingSection)
@@ -78,7 +78,7 @@ final class ConfigureSheetController: NSObject {
         // Set up constraints
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 320))
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 360))
         containerView.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
@@ -106,7 +106,7 @@ final class ConfigureSheetController: NSObject {
         let slowLabel = createLabel("Slow", bold: false, size: 11)
         slowLabel.textColor = .secondaryLabelColor
 
-        // Slider: left=slow (0.997), right=fast (0.975) - we invert when reading
+        // Slider: left=slow (0.9975), right=fast (0.965) - we invert when reading
         zoomSpeedSlider = NSSlider(value: 0.5, minValue: 0.0, maxValue: 1.0, target: self, action: #selector(zoomSpeedChanged(_:)))
         zoomSpeedSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
 
@@ -123,6 +123,26 @@ final class ConfigureSheetController: NSObject {
 
         stack.addArrangedSubview(headerLabel)
         stack.addArrangedSubview(sliderRow)
+
+        return stack
+    }
+
+    private func createQualitySection() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+
+        let headerLabel = createLabel("Visual Quality", bold: true, size: 12)
+
+        visualQualityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        visualQualityPopup.addItems(withTitles: Preferences.visualQualityNames)
+        visualQualityPopup.target = self
+        visualQualityPopup.action = #selector(visualQualityChanged(_:))
+        visualQualityPopup.widthAnchor.constraint(equalToConstant: 200).isActive = true
+
+        stack.addArrangedSubview(headerLabel)
+        stack.addArrangedSubview(visualQualityPopup)
 
         return stack
     }
@@ -188,7 +208,7 @@ final class ConfigureSheetController: NSObject {
 
         let headerLabel = createLabel("Fractal Mode", bold: true, size: 12)
 
-        juliaModeCheckbox = NSButton(checkboxWithTitle: "Julia set mode (experimental)", target: self, action: #selector(juliaModeChanged(_:)))
+        juliaModeCheckbox = NSButton(checkboxWithTitle: "Julia set mode", target: self, action: #selector(juliaModeChanged(_:)))
 
         stack.addArrangedSubview(headerLabel)
         stack.addArrangedSubview(juliaModeCheckbox)
@@ -231,26 +251,27 @@ final class ConfigureSheetController: NSObject {
 
     // MARK: - Preferences
 
-    // Slider mapping: 0 (slow) = 0.995, 1 (fast) = 0.98
-    private let slowestSpeed = 0.995
-    private let fastestSpeed = 0.975
+    // Slider mapping: 0 (slow) = 0.9975, 1 (fast) = 0.965
+    private let slowestSpeed = 0.9975
+    private let fastestSpeed = 0.965
 
     private func sliderToSpeed(_ slider: Double) -> Double {
         return slowestSpeed - (slider * (slowestSpeed - fastestSpeed))
     }
 
     private func speedToSlider(_ speed: Double) -> Double {
-        return (slowestSpeed - speed) / (slowestSpeed - fastestSpeed)
+        return max(0.0, min(1.0, (slowestSpeed - speed) / (slowestSpeed - fastestSpeed)))
     }
 
     private func loadPreferences() {
         zoomSpeedSlider.doubleValue = speedToSlider(preferences.zoomSpeed)
         updateZoomSpeedLabel()
 
-        palettePopup.selectItem(at: preferences.paletteIndex)
+        palettePopup.selectItem(at: min(preferences.paletteIndex, palettePopup.numberOfItems - 1))
         autoCycleCheckbox.state = preferences.autoCyclePalettes ? .on : .off
+        visualQualityPopup.selectItem(at: min(preferences.visualQuality, visualQualityPopup.numberOfItems - 1))
 
-        shadingModePopup.selectItem(at: preferences.shadingMode)
+        shadingModePopup.selectItem(at: min(preferences.shadingMode, shadingModePopup.numberOfItems - 1))
 
         juliaModeCheckbox.state = preferences.juliaMode ? .on : .off
     }
@@ -275,6 +296,10 @@ final class ConfigureSheetController: NSObject {
         preferences.autoCyclePalettes = (sender.state == .on)
     }
 
+    @objc private func visualQualityChanged(_ sender: NSPopUpButton) {
+        preferences.visualQuality = sender.indexOfSelectedItem
+    }
+
     @objc private func shadingModeChanged(_ sender: NSPopUpButton) {
         preferences.shadingMode = sender.indexOfSelectedItem
     }
@@ -292,8 +317,10 @@ final class ConfigureSheetController: NSObject {
         guard let window = window,
               let sheetParent = window.sheetParent else {
             window?.close()
+            self.window = nil
             return
         }
         sheetParent.endSheet(window)
+        self.window = nil
     }
 }

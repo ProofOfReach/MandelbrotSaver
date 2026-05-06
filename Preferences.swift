@@ -7,6 +7,8 @@ final class Preferences {
     // MARK: - Singleton
 
     static let shared = Preferences()
+    static let didChangeNotification = Notification.Name("MandelbrotPreferencesDidChange")
+    private static let moduleName = "MandelbrotSaver"
 
     // MARK: - Keys
 
@@ -17,6 +19,7 @@ final class Preferences {
         static let shadingMode = "shadingMode"
         static let juliaMode = "juliaMode"
         static let enableAntialiasing = "enableAntialiasing"
+        static let visualQuality = "visualQuality"
     }
 
     // MARK: - Defaults
@@ -28,33 +31,51 @@ final class Preferences {
         static let shadingMode: Int = 0
         static let juliaMode: Bool = false
         static let enableAntialiasing: Bool = true
+        static let visualQuality: Int = 1
     }
 
     // MARK: - Properties
 
     private let defaults: ScreenSaverDefaults?
 
-    /// Zoom speed (0.975 = faster, 0.995 = slower)
-    /// Range: 0.975 to 0.995
+    private func clamp<T: Comparable>(_ value: T, min minValue: T, max maxValue: T) -> T {
+        return max(minValue, min(maxValue, value))
+    }
+
+    private func persistAndNotify() {
+        defaults?.synchronize()
+        notifyChanged()
+    }
+
+    private func notifyChanged() {
+        NotificationCenter.default.post(name: Preferences.didChangeNotification, object: self)
+    }
+
+    /// Zoom speed multiplier at 60fps (lower = faster, higher = slower)
+    /// Range: 0.965 to 0.9975
     var zoomSpeed: Double {
         get {
             let value = defaults?.double(forKey: Keys.zoomSpeed) ?? 0
-            return value > 0 ? value : Defaults.zoomSpeed
+            let speed = value > 0 ? value : Defaults.zoomSpeed
+            return clamp(speed, min: 0.965, max: 0.9975)
         }
         set {
-            let clamped = max(0.975, min(0.995, newValue))
+            let clamped = clamp(newValue, min: 0.965, max: 0.9975)
             defaults?.set(clamped, forKey: Keys.zoomSpeed)
+            persistAndNotify()
         }
     }
 
-    /// Current palette index (0-23)
+    /// Current palette index
     var paletteIndex: Int {
         get {
-            return defaults?.integer(forKey: Keys.paletteIndex) ?? Defaults.paletteIndex
+            let value = defaults?.integer(forKey: Keys.paletteIndex) ?? Defaults.paletteIndex
+            return clamp(value, min: 0, max: Preferences.paletteNames.count - 1)
         }
         set {
-            let clamped = max(0, min(23, newValue))
+            let clamped = clamp(newValue, min: 0, max: Preferences.paletteNames.count - 1)
             defaults?.set(clamped, forKey: Keys.paletteIndex)
+            persistAndNotify()
         }
     }
 
@@ -69,17 +90,20 @@ final class Preferences {
         }
         set {
             defaults?.set(newValue, forKey: Keys.autoCyclePalettes)
+            persistAndNotify()
         }
     }
 
     /// Shading mode: 0 = flat, 1 = 3D Blinn-Phong, 2 = angle-based, 3 = stripe
     var shadingMode: Int {
         get {
-            return defaults?.integer(forKey: Keys.shadingMode) ?? Defaults.shadingMode
+            let value = defaults?.integer(forKey: Keys.shadingMode) ?? Defaults.shadingMode
+            return clamp(value, min: 0, max: Preferences.shadingModeNames.count - 1)
         }
         set {
-            let clamped = max(0, min(3, newValue))
+            let clamped = clamp(newValue, min: 0, max: Preferences.shadingModeNames.count - 1)
             defaults?.set(clamped, forKey: Keys.shadingMode)
+            persistAndNotify()
         }
     }
 
@@ -93,6 +117,7 @@ final class Preferences {
         }
         set {
             defaults?.set(newValue, forKey: Keys.juliaMode)
+            persistAndNotify()
         }
     }
 
@@ -106,15 +131,30 @@ final class Preferences {
         }
         set {
             defaults?.set(newValue, forKey: Keys.enableAntialiasing)
+            persistAndNotify()
+        }
+    }
+
+    /// Visual quality: 0 = Standard, 1 = Ultra
+    var visualQuality: Int {
+        get {
+            if defaults?.object(forKey: Keys.visualQuality) == nil {
+                return enableAntialiasing ? 1 : 0
+            }
+            let value = defaults?.integer(forKey: Keys.visualQuality) ?? Defaults.visualQuality
+            return clamp(value, min: 0, max: Preferences.visualQualityNames.count - 1)
+        }
+        set {
+            let clamped = clamp(newValue, min: 0, max: Preferences.visualQualityNames.count - 1)
+            defaults?.set(clamped, forKey: Keys.visualQuality)
+            persistAndNotify()
         }
     }
 
     // MARK: - Initialization
 
     private init() {
-        // Use the screensaver's bundle identifier for defaults
-        let bundleIdentifier = Bundle(for: Preferences.self).bundleIdentifier ?? "com.mandelbrot.saver"
-        defaults = ScreenSaverDefaults(forModuleWithName: bundleIdentifier)
+        defaults = ScreenSaverDefaults(forModuleWithName: Preferences.moduleName)
 
         // Register defaults
         defaults?.register(defaults: [
@@ -123,7 +163,8 @@ final class Preferences {
             Keys.autoCyclePalettes: Defaults.autoCyclePalettes,
             Keys.shadingMode: Defaults.shadingMode,
             Keys.juliaMode: Defaults.juliaMode,
-            Keys.enableAntialiasing: Defaults.enableAntialiasing
+            Keys.enableAntialiasing: Defaults.enableAntialiasing,
+            Keys.visualQuality: Defaults.visualQuality
         ])
     }
 
@@ -136,35 +177,17 @@ final class Preferences {
         autoCyclePalettes = Defaults.autoCyclePalettes
         shadingMode = Defaults.shadingMode
         juliaMode = Defaults.juliaMode
-        enableAntialiasing = Defaults.enableAntialiasing
+        visualQuality = Defaults.visualQuality
     }
 
     /// Palette names for UI display
     static let paletteNames = [
         "Ultra Fractal",
-        "Fire",
-        "Ocean",
-        "Electric",
-        "Sunset",
-        "Glacial",
-        "Rainbow",
-        "Plasma",
-        "Lava",
-        "Forest",
-        "Midnight",
-        "Aurora",
-        "Copper",
-        "Emerald",
-        "Amethyst",
-        "Gold",
-        "Silver",
-        "Bronze",
+        "Ember",
+        "Abyss",
         "Neon",
-        "Vapor",
-        "Thermal",
-        "Spectrum",
-        "Monochrome",
-        "Candy"
+        "Aurora",
+        "Graphite"
     ]
 
     /// Shading mode names for UI display
@@ -173,5 +196,10 @@ final class Preferences {
         "3D Blinn-Phong",
         "Angle-based",
         "Stripe"
+    ]
+
+    static let visualQualityNames = [
+        "Standard",
+        "Ultra"
     ]
 }

@@ -3,19 +3,6 @@ import Metal
 import QuartzCore
 import simd
 
-// Debug logging to file (NSLog is swallowed by unified log privacy)
-private func dbg(_ msg: String) {
-    let s = "\(Date()): \(msg)\n"
-    let path = "/tmp/mandelbrot_debug.log"
-    if let fh = FileHandle(forWritingAtPath: path) {
-        fh.seekToEndOfFile()
-        fh.write(s.data(using: .utf8)!)
-        fh.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: s.data(using: .utf8))
-    }
-}
-
 @objc(MandelbrotView)
 class MandelbrotView: ScreenSaverView {
     // Use a CAMetalLayer directly on ScreenSaverView; avoids legacyScreenSaver subview compositing issues.
@@ -25,10 +12,18 @@ class MandelbrotView: ScreenSaverView {
     private var metalDevice: MTLDevice?
     private var commandQueue: MTLCommandQueue?
     private var computePipelineFloat: MTLComputePipelineState?
-    private var computePipelineHighPrecision: MTLComputePipelineState?
     private var computePipelinePerturbation: MTLComputePipelineState?
     private var referenceOrbitBuffer: MTLBuffer?
-    private var maxOrbitIterations: Int = 0
+    private var qualityProbeTexture: MTLTexture?
+    private var qualityProbePixels: [UInt8] = []
+
+    private struct ShaderUniforms {
+        var geometry: SIMD4<Float> // centerX_hi, centerY_hi, scale, maxIterations
+        var palette: SIMD4<Float>  // colorOffset, aspectRatio, paletteIndex, paletteMix
+        var view: SIMD4<Float>     // centerX_lo, centerY_lo, shadingMode, time
+        var mode: SIMD4<Float>     // opacity, juliaMode, juliaCx, juliaCy
+        var quality: SIMD4<Float>  // aaSamples, lightingQuality, reserved, reserved
+    }
 
     // Direct display path
     private var metalLayer: CAMetalLayer?
@@ -52,7 +47,7 @@ class MandelbrotView: ScreenSaverView {
     private var transitionOpacity: Float = 1.0
     private let fadeSpeed: Float = 0.02
 
-    // MARK: - Zoom State (using Double for precision)
+    // MARK: - Zoom State
     private var centerX: DoubleDouble = DoubleDouble(-0.5)
     private var centerY: DoubleDouble = DoubleDouble(0.0)
     private var scale: DoubleDouble = DoubleDouble(3.0)
@@ -72,13 +67,30 @@ class MandelbrotView: ScreenSaverView {
     private var paletteMix: Float = 0.0
     private var paletteTimer: Float = 0.0
     private var shadingMode: Int = 0
+    private var visualQuality: Int = 1
     private var time: Float = 0.0
     private var autoCyclePalettes: Bool = true
-    private var frameCount: Int = 0
+    private var lastPreferenceReload: CFAbsoluteTime = 0
+    private var lastLoadedPalettePreference: Int?
+    private var lastLoadedAutoCyclePreference: Bool?
     private var lastFrameTime: CFAbsoluteTime = 0
+    private var lastQualityProbeTime: CFAbsoluteTime = 0
+    private var poorQualityFrameCount: Int = 0
     private var slowFrameCount: Int = 0
     private var zoomStartTime: CFAbsoluteTime = 0
-    private let maxZoomDuration: CFAbsoluteTime = 20
+    private let minZoomDuration: CFAbsoluteTime = 24
+    private let maxZoomDuration: CFAbsoluteTime = 140
+    private let paletteCycleDuration: CFAbsoluteTime = 18
+    private let qualityProbeInterval: CFAbsoluteTime = 0.75
+    private let qualityProbeWidth = 96
+    private let qualityProbeHeight = 64
+
+    private struct RenderPolicy {
+        let antialiasSamples: Int
+        let lightingQuality: Int
+        let maxFloatIterations: Int
+        let maxPerturbationIterations: Int
+    }
 
     // MARK: - Julia Set Mode
     private var juliaEnabled: Bool = false
@@ -107,58 +119,29 @@ class MandelbrotView: ScreenSaverView {
     ]
 
     // MARK: - Interesting zoom targets
-    // At speed 0.985, 60fps, 20s: scale reaches ~3.7e-8 (7.4 decades from 3.0)
-    // Target scales set to 1e-5 .. 1e-7 so zoom reaches them and triggers natural fade
+    // Curated for screensaver value: dense structure, low empty-center risk, and stable real-time depth.
     private let interestingPoints: [(x: String, y: String, minScale: String, name: String)] = [
-        // Seahorse Valley - the most iconic Mandelbrot region
         ("-0.7445388635959773", "0.1217247190726782", "1e-7", "Seahorse Valley Deep Spiral"),
         ("-0.7451968299999999", "0.10186988500000009", "1e-6", "Seahorse Valley Classic"),
         ("-0.7463", "0.1102", "1e-5", "Seahorse Valley Wide"),
-        // Elephant Valley - trunk structures and mini-brots
         ("0.2777323864244548", "0.0073446267400780795", "1e-6", "Elephant Trunk"),
         ("0.33698444648740383", "0.048778219678026105", "1e-6", "Elephant Eye"),
-        ("0.250006", "0.00000045", "1e-7", "Elephant Valley Cusp"),
-        // Spirals and vortices
         ("-0.0875937321188787", "0.6550902802386774", "1e-6", "Triple Spiral Valley"),
         ("-0.5360670633819427", "-0.5255257785409202", "1e-6", "Turbulence"),
         ("-0.22163951090127437", "-0.7115537848292754", "1e-6", "LSD Spiral"),
         ("0.452721018749286", "0.39649427698014", "1e-6", "Galaxies"),
         ("0.35787121400640803", "-0.10813970113434704", "1e-6", "Carousel Spirals"),
         ("-0.16070135", "1.0375665", "1e-5", "Sunburst"),
-        // Antenna and needle region
-        ("-1.7397156556930304", "-9.157504622931403e-8", "1e-7", "Wormhole"),
-        ("-1.7397082221332807", "-4.768199679090003e-6", "1e-6", "Praline"),
-        ("-1.4011551890920506", "0.0", "1e-6", "Feigenbaum Point"),
-        // Mini-brots and satellite copies
         ("-1.25066", "0.02012", "1e-6", "Scepter Valley"),
-        ("-1.768778833", "0.004238705", "1e-6", "Elephant Mini"),
         ("-0.1528", "1.0397", "1e-5", "Period-3 Boundary"),
-        // Filaments and dendrites
         ("-0.374004139", "-0.659792175", "1e-5", "Starfish Filament"),
         ("-0.749767676767", "0.020113113113", "1e-6", "Triple Spiral Tendril"),
-        // Scepter region - hooks and branches
-        ("-1.25709", "0.02500", "1e-6", "Seahorse West Entrance"),
         ("-1.249783", "0.029353", "1e-6", "Scepter Double-Hook"),
         ("-1.2494989", "0.0303330", "1e-7", "Scepter Hook Core"),
-        // Mini-Mandelbrot copies and satellites
-        ("-1.749086", "0.0", "1e-6", "Period-3 Minibrot Cusp"),
-        ("-1.76733", "0.00002", "1e-6", "Largest Minibrot Rim"),
-        ("-1.7891690186048231", "-0.0000003393685157672", "1e-7", "11 Dimensions Anchor"),
-        // Unusual morphologies and alien geometry
         ("-0.7528585928145695", "0.04314319321653719", "1e-6", "Hidden Teddy Boundary"),
         ("0.36024044343761436", "-0.6413130610648032", "1e-6", "Eye of the Universe"),
         ("0.274", "0.482", "1e-5", "Quad Spiral Cusp"),
-        // Real-axis and antenna structures
-        ("-1.79032749199934", "0.0", "1e-7", "Period-3 Tip"),
-        ("-1.7868562072981548", "0.0", "1e-7", "Real-Line Minibrot Corridor"),
-        ("-1.6690", "0.0029", "1e-5", "Main Antenna Filament"),
-        // Period boundaries and weaves
-        ("-1.2067", "0.0001", "1e-5", "Period-2 Boundary Weave"),
         ("-0.1267", "0.8442", "1e-5", "Double Scepter Valley"),
-        ("-1.9999944848854987", "0.0", "1e-7", "End-of-Line Edge"),
-        ("0.3191", "0.6007", "1e-5", "Northeast Radical Basin"),
-        ("-0.1296", "0.8394", "1e-6", "Double Scepter Filament Knot"),
-        ("-1.9999858811837755", "0.00000000001583008566655028", "1e-7", "End-of-Line Off-Axis"),
     ]
 
     private var currentTargetIndex: Int = 0
@@ -168,9 +151,9 @@ class MandelbrotView: ScreenSaverView {
 
     override init?(frame: NSRect, isPreview: Bool) {
         super.init(frame: frame, isPreview: isPreview)
-        dbg("init frame=\(frame) isPreview=\(isPreview)")
         wantsLayer = true
         loadPreferences()
+        observePreferenceChanges()
         setupMetal()
         selectRandomTarget()
         animationTimeInterval = 1.0 / 60.0
@@ -180,9 +163,14 @@ class MandelbrotView: ScreenSaverView {
         super.init(coder: coder)
         wantsLayer = true
         loadPreferences()
+        observePreferenceChanges()
         setupMetal()
         selectRandomTarget()
         animationTimeInterval = 1.0 / 60.0
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override func viewDidMoveToWindow() {
@@ -198,11 +186,67 @@ class MandelbrotView: ScreenSaverView {
 
     private func loadPreferences() {
         let prefs = Preferences.shared
+        let previousJuliaEnabled = juliaEnabled
+        let newPalette = prefs.paletteIndex
+        let newAutoCycle = prefs.autoCyclePalettes
         zoomSpeed = DoubleDouble(prefs.zoomSpeed)
-        currentPalette = prefs.paletteIndex
-        autoCyclePalettes = prefs.autoCyclePalettes
+
+        if lastLoadedPalettePreference != newPalette {
+            currentPalette = newPalette
+            paletteTimer = 0.0
+            paletteMix = 0.0
+            lastLoadedPalettePreference = newPalette
+        }
+
+        if lastLoadedAutoCyclePreference != newAutoCycle {
+            autoCyclePalettes = newAutoCycle
+            paletteTimer = 0.0
+            paletteMix = 0.0
+            lastLoadedAutoCyclePreference = newAutoCycle
+        }
+
         shadingMode = prefs.shadingMode
         juliaEnabled = prefs.juliaMode
+        visualQuality = prefs.visualQuality
+
+        if previousJuliaEnabled != juliaEnabled && zoomStartTime > 0 {
+            selectRandomTarget()
+        }
+    }
+
+    private var renderPolicy: RenderPolicy {
+        if visualQuality >= 1 {
+            return RenderPolicy(
+                antialiasSamples: 1,
+                lightingQuality: 2,
+                maxFloatIterations: 650,
+                maxPerturbationIterations: 1200
+            )
+        }
+        return RenderPolicy(
+            antialiasSamples: 1,
+            lightingQuality: 1,
+            maxFloatIterations: 450,
+            maxPerturbationIterations: 900
+        )
+    }
+
+    private func observePreferenceChanges() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(preferencesDidChange(_:)),
+            name: Preferences.didChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func preferencesDidChange(_ notification: Notification) {
+        let previousQuality = visualQuality
+        loadPreferences()
+        if previousQuality != visualQuality {
+            lastTextureSize = .zero
+            updateMetalLayerGeometry()
+        }
     }
 
     private func setupMetal() {
@@ -224,26 +268,14 @@ class MandelbrotView: ScreenSaverView {
         do {
             // float precision
             let floatConstants = MTLFunctionConstantValues()
-            var useHighPrecision = false
             var usePerturbation = false
-            floatConstants.setConstantValue(&useHighPrecision, type: .bool, index: 0)
-            floatConstants.setConstantValue(&usePerturbation, type: .bool, index: 1)
+            floatConstants.setConstantValue(&usePerturbation, type: .bool, index: 0)
             computePipelineFloat = try device.makeComputePipelineState(function: try library.makeFunction(name: "mandelbrotKernel", constantValues: floatConstants))
-
-            // double-double precision
-            let highPrecConstants = MTLFunctionConstantValues()
-            useHighPrecision = true
-            usePerturbation = false
-            highPrecConstants.setConstantValue(&useHighPrecision, type: .bool, index: 0)
-            highPrecConstants.setConstantValue(&usePerturbation, type: .bool, index: 1)
-            computePipelineHighPrecision = try device.makeComputePipelineState(function: try library.makeFunction(name: "mandelbrotKernel", constantValues: highPrecConstants))
 
             // perturbation path
             let perturbConstants = MTLFunctionConstantValues()
-            useHighPrecision = false
             usePerturbation = true
-            perturbConstants.setConstantValue(&useHighPrecision, type: .bool, index: 0)
-            perturbConstants.setConstantValue(&usePerturbation, type: .bool, index: 1)
+            perturbConstants.setConstantValue(&usePerturbation, type: .bool, index: 0)
             computePipelinePerturbation = try device.makeComputePipelineState(function: try library.makeFunction(name: "mandelbrotKernel", constantValues: perturbConstants))
         } catch {
             NSLog("MandelbrotSaver: Failed to create compute pipelines: \(error)")
@@ -252,14 +284,12 @@ class MandelbrotView: ScreenSaverView {
         if preferDirectMetalLayer {
             setupDirectMetalLayer(device: device)
         }
-
-        dbg("setupMetal done: device=\(metalDevice?.name ?? "nil") directLayer=\(metalLayer != nil)")
     }
 
     private func setupDirectMetalLayer(device: MTLDevice) {
         let layer = CAMetalLayer()
         layer.device = device
-        layer.pixelFormat = .bgra8Unorm
+        layer.pixelFormat = .bgra8Unorm_srgb
         layer.framebufferOnly = false
         layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         layer.isOpaque = true
@@ -275,11 +305,11 @@ class MandelbrotView: ScreenSaverView {
 
         metalLayer.frame = bounds
 
-        // Render at 1x point size regardless of Retina scale - 4x fewer pixels, smooth animation
         let size = currentRenderSize()
-        metalLayer.contentsScale = 1.0
-        metalLayer.drawableSize = CGSize(width: max(1, Int(size.width)),
-                                         height: max(1, Int(size.height)))
+        let renderScale = currentRenderScale()
+        metalLayer.contentsScale = renderScale
+        metalLayer.drawableSize = CGSize(width: max(1, Int(size.width * renderScale)),
+                                         height: max(1, Int(size.height * renderScale)))
     }
 
     private func currentRenderSize() -> CGSize {
@@ -290,6 +320,15 @@ class MandelbrotView: ScreenSaverView {
             return contentBounds.size
         }
         return isPreview ? CGSize(width: 320, height: 240) : CGSize(width: 800, height: 600)
+    }
+
+    private func currentRenderScale() -> CGFloat {
+        if isPreview || visualQuality <= 0 {
+            return 1.0
+        }
+
+        let backingScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        return min(max(backingScale, 1.0), 2.0)
     }
 
     private func createFallbackTextureIfNeeded() {
@@ -326,77 +365,77 @@ class MandelbrotView: ScreenSaverView {
         } while newIndex == currentTargetIndex && interestingPoints.count > 1
 
         currentTargetIndex = newIndex
-        let target = interestingPoints[currentTargetIndex]
-        targetCenterX = DoubleDouble(target.x)
-        targetCenterY = DoubleDouble(target.y)
-        targetScale = DoubleDouble(target.minScale)
-
-        centerX = DoubleDouble(-0.5)
-        centerY = DoubleDouble(0.0)
-        scale = DoubleDouble(3.0)
 
         zoomCount += 1
-        maxOrbitIterations = 0
         slowFrameCount = 0
+        poorQualityFrameCount = 0
         zoomStartTime = CFAbsoluteTimeGetCurrent()
 
-        if juliaEnabled && zoomCount % 4 == 0 {
-            juliaMode = !juliaMode
-            if juliaMode {
-                let juliaIndex = Int.random(in: 0..<interestingJuliaC.count)
-                let juliaC = interestingJuliaC[juliaIndex]
-                juliaCx = juliaC.cx
-                juliaCy = juliaC.cy
-                centerX = DoubleDouble(0.0)
-                centerY = DoubleDouble(0.0)
-                targetCenterX = DoubleDouble(0.0)
-                targetCenterY = DoubleDouble(0.0)
-                targetScale = DoubleDouble(3e-5)
-            }
-        } else if !juliaEnabled {
+        if juliaEnabled {
+            juliaMode = true
+            let juliaIndex = Int.random(in: 0..<interestingJuliaC.count)
+            let juliaC = interestingJuliaC[juliaIndex]
+            juliaCx = juliaC.cx
+            juliaCy = juliaC.cy
+            centerX = DoubleDouble(0.0)
+            centerY = DoubleDouble(0.0)
+            targetCenterX = DoubleDouble(0.0)
+            targetCenterY = DoubleDouble(0.0)
+            targetScale = DoubleDouble(3e-5)
+        } else {
             juliaMode = false
+            let target = interestingPoints[currentTargetIndex]
+            targetCenterX = DoubleDouble(target.x)
+            targetCenterY = DoubleDouble(target.y)
+            targetScale = DoubleDouble(target.minScale)
+            centerX = targetCenterX
+            centerY = targetCenterY
         }
 
-        if zoomCount % 3 == 0 {
-            shadingMode = (shadingMode + 1) % 4
-        }
+        scale = DoubleDouble(3.0)
     }
 
     private func updateAnimation() {
         // Track frame time - bail out if rendering is too slow
         let now = CFAbsoluteTimeGetCurrent()
+        let frameDelta: CFAbsoluteTime
         if lastFrameTime > 0 {
             let dt = now - lastFrameTime
+            frameDelta = min(max(dt, 1.0 / 120.0), 0.1)
             if dt > 0.08 { // slower than ~12fps
                 slowFrameCount += 1
             } else {
                 slowFrameCount = 0
             }
+        } else {
+            frameDelta = animationTimeInterval
         }
         lastFrameTime = now
+        let frameScale = frameDelta * 60.0
+        reloadPreferencesIfNeeded(now: now)
 
         switch transitionState {
         case .zooming:
-            // Bail if too slow or zoom has run long enough
             let zoomElapsed = now - zoomStartTime
-            if slowFrameCount >= 3 || zoomElapsed > maxZoomDuration {
+            if slowFrameCount >= 3 || zoomElapsed > zoomDurationLimit {
                 slowFrameCount = 0
                 transitionState = .fadingOut
             }
 
-            scale = scale * zoomSpeed
+            scale = scale * pow(zoomSpeed.hi, frameScale)
 
             let dx = targetCenterX - centerX
             let dy = targetCenterY - centerY
-            centerX = centerX + (dx * panSpeed)
-            centerY = centerY + (dy * panSpeed)
+            let panFactor = 1.0 - pow(1.0 - panSpeed.hi, frameScale)
+            centerX = centerX + (dx * panFactor)
+            centerY = centerY + (dy * panFactor)
 
             if scale.hi < targetScale.hi * 2.0 {
                 transitionState = .fadingOut
             }
 
         case .fadingOut:
-            transitionOpacity -= fadeSpeed
+            transitionOpacity -= fadeSpeed * Float(frameScale)
             if transitionOpacity <= 0.0 {
                 transitionOpacity = 0.0
                 selectRandomTarget()
@@ -404,22 +443,22 @@ class MandelbrotView: ScreenSaverView {
             }
 
         case .fadingIn:
-            transitionOpacity += fadeSpeed
+            transitionOpacity += fadeSpeed * Float(frameScale)
             if transitionOpacity >= 1.0 {
                 transitionOpacity = 1.0
                 transitionState = .zooming
             }
         }
 
-        colorOffset += 0.3
+        colorOffset += Float(frameDelta * 18.0)
         if colorOffset > 10000.0 {
             colorOffset = 0.0
         }
 
         if autoCyclePalettes {
-            paletteTimer += 0.001
+            paletteTimer += Float(frameDelta / paletteCycleDuration)
             if paletteTimer >= 1.0 {
-                paletteTimer = 0.0
+                paletteTimer = paletteTimer.truncatingRemainder(dividingBy: 1.0)
                 currentPalette = (currentPalette + 1) % Preferences.paletteNames.count
             }
             paletteMix = paletteTimer
@@ -427,12 +466,22 @@ class MandelbrotView: ScreenSaverView {
             paletteMix = 0.0
         }
 
-        frameCount += 1
-        if frameCount % 60 == 0 {
-            loadPreferences()
-        }
+        time += Float(frameDelta)
+    }
 
-        time += 0.016
+    private func reloadPreferencesIfNeeded(now: CFAbsoluteTime) {
+        guard now - lastPreferenceReload >= 0.25 else { return }
+        lastPreferenceReload = now
+        loadPreferences()
+    }
+
+    private var zoomDurationLimit: CFAbsoluteTime {
+        let target = max(targetScale.hi * 2.0, 1e-12)
+        let start = 3.0
+        let speed = min(max(zoomSpeed.hi, 0.0001), 0.9999)
+        let estimatedFrames = log(target / start) / log(speed)
+        let estimatedSeconds = estimatedFrames / 60.0
+        return min(max(estimatedSeconds, minZoomDuration), maxZoomDuration)
     }
 
     // MARK: - Perturbation Theory Helper
@@ -443,7 +492,6 @@ class MandelbrotView: ScreenSaverView {
         let bufferLength = maxIterations * MemoryLayout<SIMD4<Float>>.size
         if referenceOrbitBuffer == nil || referenceOrbitBuffer!.length < bufferLength {
             referenceOrbitBuffer = device.makeBuffer(length: bufferLength, options: .storageModeShared)
-            maxOrbitIterations = maxIterations
         }
 
         guard let buffer = referenceOrbitBuffer else { return }
@@ -512,19 +560,140 @@ class MandelbrotView: ScreenSaverView {
         let texture: MTLTexture
         let drawable: CAMetalDrawable?
         let size: CGSize
-        let usesFallback: Bool
     }
 
     private func acquireRenderTarget() -> RenderTarget? {
         if let layer = metalLayer, let drawable = layer.nextDrawable() {
             let size = CGSize(width: drawable.texture.width, height: drawable.texture.height)
-            return RenderTarget(texture: drawable.texture, drawable: drawable, size: size, usesFallback: false)
+            return RenderTarget(texture: drawable.texture, drawable: drawable, size: size)
         }
 
         createFallbackTextureIfNeeded()
         guard let texture = fallbackTexture else { return nil }
         let size = CGSize(width: texture.width, height: texture.height)
-        return RenderTarget(texture: texture, drawable: nil, size: size, usesFallback: true)
+        return RenderTarget(texture: texture, drawable: nil, size: size)
+    }
+
+    private func makeUniforms(width: Int, height: Int, maxIterations: Int, policy: RenderPolicy) -> ShaderUniforms {
+        let aspectRatio = Float(width) / Float(max(height, 1))
+        return ShaderUniforms(
+            geometry: SIMD4<Float>(Float(centerX.hi), Float(centerY.hi), Float(scale.hi), Float(maxIterations)),
+            palette: SIMD4<Float>(colorOffset, aspectRatio, Float(currentPalette), paletteMix),
+            view: SIMD4<Float>(Float(centerX.lo), Float(centerY.lo), Float(shadingMode), time),
+            mode: SIMD4<Float>(transitionOpacity, juliaMode ? 1.0 : 0.0, Float(juliaCx), Float(juliaCy)),
+            quality: SIMD4<Float>(Float(policy.antialiasSamples), Float(policy.lightingQuality), 0.0, 0.0)
+        )
+    }
+
+    private func createQualityProbeTextureIfNeeded() {
+        guard qualityProbeTexture == nil, let device = metalDevice else { return }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: qualityProbeWidth,
+            height: qualityProbeHeight,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderWrite, .shaderRead]
+        descriptor.storageMode = .shared
+
+        qualityProbeTexture = device.makeTexture(descriptor: descriptor)
+        qualityProbePixels = [UInt8](repeating: 0, count: qualityProbeWidth * qualityProbeHeight * 4)
+    }
+
+    private func shouldEndForVisualQuality(
+        pipeline: MTLComputePipelineState,
+        maxIterations: Int,
+        policy: RenderPolicy,
+        now: CFAbsoluteTime
+    ) -> Bool {
+        guard transitionState == .zooming,
+              now - lastQualityProbeTime >= qualityProbeInterval,
+              let commandBuffer = commandQueue?.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return false
+        }
+
+        lastQualityProbeTime = now
+        createQualityProbeTextureIfNeeded()
+        guard let texture = qualityProbeTexture else { return false }
+
+        var uniforms = makeUniforms(
+            width: qualityProbeWidth,
+            height: qualityProbeHeight,
+            maxIterations: maxIterations,
+            policy: policy
+        )
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(texture, index: 0)
+        encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
+
+        if referenceOrbitBuffer == nil {
+            referenceOrbitBuffer = metalDevice?.makeBuffer(length: 16, options: .storageModeShared)
+        }
+        if let refBuffer = referenceOrbitBuffer {
+            encoder.setBuffer(refBuffer, offset: 0, index: 1)
+        }
+
+        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (qualityProbeWidth + threadGroupSize.width - 1) / threadGroupSize.width,
+            height: (qualityProbeHeight + threadGroupSize.height - 1) / threadGroupSize.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if commandBuffer.error != nil {
+            poorQualityFrameCount += 1
+            return poorQualityFrameCount >= 2
+        }
+
+        texture.getBytes(
+            &qualityProbePixels,
+            bytesPerRow: qualityProbeWidth * 4,
+            from: MTLRegionMake2D(0, 0, qualityProbeWidth, qualityProbeHeight),
+            mipmapLevel: 0
+        )
+
+        var nonBlack = 0
+        var bright = 0
+        var sum = 0.0
+        var sumSquares = 0.0
+        let pixelCount = qualityProbeWidth * qualityProbeHeight
+
+        for offset in stride(from: 0, to: qualityProbePixels.count, by: 4) {
+            let b = Double(qualityProbePixels[offset]) / 255.0
+            let g = Double(qualityProbePixels[offset + 1]) / 255.0
+            let r = Double(qualityProbePixels[offset + 2]) / 255.0
+            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            if luminance > 0.025 { nonBlack += 1 }
+            if luminance > 0.20 { bright += 1 }
+            sum += luminance
+            sumSquares += luminance * luminance
+        }
+
+        let count = Double(pixelCount)
+        let mean = sum / count
+        let variance = max(0.0, (sumSquares / count) - mean * mean)
+        let nonBlackRatio = Double(nonBlack) / count
+        let brightRatio = Double(bright) / count
+
+        let mostlyEmpty = nonBlackRatio < 0.06 || brightRatio < 0.015
+        let collapsedContrast = nonBlackRatio < 0.20 && variance < 0.0012
+        let tooDeep = scale.hi < targetScale.hi * 3.0
+
+        if tooDeep || mostlyEmpty || collapsedContrast {
+            poorQualityFrameCount += 1
+        } else {
+            poorQualityFrameCount = 0
+        }
+
+        return poorQualityFrameCount >= 2
     }
 
     // Returns true if NSView draw() should be triggered for CPU fallback presentation.
@@ -537,6 +706,7 @@ class MandelbrotView: ScreenSaverView {
 
         let depth = max(0.0, log10(3.0 / scale.hi))
         let currentScale = scale.hi
+        let policy = renderPolicy
 
         // Skip DD tier for real-time — it's too slow per-pixel.
         // Go directly from float to perturbation at scale <= 1e-6.
@@ -545,10 +715,10 @@ class MandelbrotView: ScreenSaverView {
         let maxIterations: Int
         if usePerturbation {
             pipeline = computePipelinePerturbation
-            maxIterations = min(900, Int(320 + depth * 36))
+            maxIterations = min(policy.maxPerturbationIterations, Int(320 + depth * 36))
         } else {
             pipeline = computePipelineFloat
-            maxIterations = min(450, Int(220 + depth * 24))
+            maxIterations = min(policy.maxFloatIterations, Int(220 + depth * 24))
         }
         let iterCount = maxIterations
 
@@ -562,32 +732,35 @@ class MandelbrotView: ScreenSaverView {
             updateReferenceOrbit(maxIterations: iterCount)
         }
 
-        let centerX_hi = Float(centerX.hi)
-        let centerX_lo = Float(centerX.lo)
-        let centerY_hi = Float(centerY.hi)
-        let centerY_lo = Float(centerY.lo)
+        if shouldEndForVisualQuality(
+            pipeline: pipeline,
+            maxIterations: maxIterations,
+            policy: policy,
+            now: CFAbsoluteTimeGetCurrent()
+        ) {
+            transitionState = .fadingOut
+            poorQualityFrameCount = 0
+        }
 
-        var params = simd_float4(centerX_hi, centerY_hi, Float(scale.hi), Float(maxIterations))
-        let aspectRatio = Float(target.size.width / target.size.height)
-        var params2 = simd_float4(colorOffset, aspectRatio, Float(currentPalette), paletteMix)
-        var params3 = simd_float4(centerX_lo, centerY_lo, Float(shadingMode), time)
-        var params4 = simd_float4(transitionOpacity, juliaMode ? 1.0 : 0.0, Float(juliaCx), Float(juliaCy))
+        var uniforms = makeUniforms(
+            width: target.texture.width,
+            height: target.texture.height,
+            maxIterations: maxIterations,
+            policy: policy
+        )
 
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(target.texture, index: 0)
-        encoder.setBytes(&params, length: MemoryLayout<simd_float4>.size, index: 0)
-        encoder.setBytes(&params2, length: MemoryLayout<simd_float4>.size, index: 1)
-        encoder.setBytes(&params3, length: MemoryLayout<simd_float4>.size, index: 2)
-        encoder.setBytes(&params4, length: MemoryLayout<simd_float4>.size, index: 3)
+        encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
 
         if usePerturbation, let refBuffer = referenceOrbitBuffer {
-            encoder.setBuffer(refBuffer, offset: 0, index: 5)
+            encoder.setBuffer(refBuffer, offset: 0, index: 1)
         } else {
             if referenceOrbitBuffer == nil {
                 referenceOrbitBuffer = metalDevice?.makeBuffer(length: 16, options: .storageModeShared)
             }
             if let refBuffer = referenceOrbitBuffer {
-                encoder.setBuffer(refBuffer, offset: 0, index: 5)
+                encoder.setBuffer(refBuffer, offset: 0, index: 1)
             }
         }
 
@@ -670,10 +843,6 @@ class MandelbrotView: ScreenSaverView {
 
     override func animateOneFrame() {
         updateAnimation()
-
-        if frameCount <= 5 {
-            dbg("animateOneFrame #\(frameCount) bounds=\(bounds) directLayer=\(metalLayer != nil) scale=\(scale.hi)")
-        }
 
         let needsCPUDisplay = renderFrame()
         if needsCPUDisplay {

@@ -30,9 +30,9 @@
 | Feature | What It Does |
 |---------|--------------|
 | **60fps Metal Rendering** | Buttery smooth zooms powered by your Mac's GPU |
-| **24 Color Palettes** | From classic Ultra Fractal to Neon, Vapor, and Candy |
-| **Julia Set Mode** | Alternates between Mandelbrot and mesmerizing Julia sets |
-| **P3 Wide Gamut** | Vivid colors that pop on modern Mac displays |
+| **Curated Color Palettes** | Six distinct looks instead of a long list of near-duplicates |
+| **Julia Set Mode** | Switches from Mandelbrot targets to curated Julia constants |
+| **Rich Color Palettes** | Distinct sRGB palettes tuned for smooth fractal coloring |
 | **3D Lighting** | Optional Blinn-Phong shading with specular highlights |
 | **Zero Config** | Works beautifully out of the box, customize if you want |
 
@@ -58,11 +58,11 @@ That's it. Your Mac now has a continuously zooming fractal screensaver.
 |---------|------------------|----------------|--------|----------------|
 | GPU Accelerated | **Yes** (Metal) | No (CPU) | No | Partial |
 | Continuous Zoom | **Yes** (cycles through locations) | No | No | No |
-| Customizable | **Yes** (24 palettes, 4 shading modes) | Limited | No | Limited |
+| Customizable | **Yes** (6 palettes, 4 shading modes) | Limited | No | Limited |
 | Julia Sets | **Yes** | No | No | No |
 | Free | **Yes** | Yes | Yes | Yes |
 | Works Offline | **Yes** | No (needs network) | Yes | Yes |
-| Wide Gamut (P3) | **Yes** | No | No | Partial |
+| Multiple Palettes | **Yes** | No | No | Partial |
 
 **Best for**: Anyone who wants a beautiful, mesmerizing screensaver that showcases their Mac's GPU.
 
@@ -96,6 +96,13 @@ Build options:
 ```bash
 ./build.sh           # Build only (creates MandelbrotSaver.saver/)
 ./build.sh --install # Build and install to ~/Library/Screen Savers/
+./scripts/smoke-test.sh # Build and verify bundle, signing, architectures, and Metal library
+```
+
+`build.sh` creates a universal Intel/Apple Silicon binary. If the Metal toolchain is missing, install it with:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
 ```
 
 ---
@@ -107,25 +114,20 @@ Click **Options** in System Settings → Screen Saver to customize:
 | Setting | Options | Default |
 |---------|---------|---------|
 | **Zoom Speed** | Slow ← → Fast slider | Medium |
-| **Palette** | 9 color schemes (6 standard + 3 P3 wide gamut) | Ultra Fractal |
+| **Palette** | 6 curated color schemes | Ultra Fractal |
 | **Auto-cycle Palettes** | On/Off | On |
+| **Visual Quality** | Standard, Ultra | Ultra |
 | **Shading Mode** | Flat, 3D Blinn-Phong, Angle-based, Stripe | Flat |
-| **Julia Set Mode** | On/Off (shows Julia sets every 4th zoom) | Off |
+| **Julia Set Mode** | On/Off (renders curated Julia sets instead of Mandelbrot targets) | Off |
 
 ### Palettes
 
-**Standard:**
 - Ultra Fractal (classic blue-gold)
-- Fire (red-orange-yellow)
-- Ocean (deep blues and teals)
-- Electric (cyan-magenta)
-- Sunset (warm oranges and purples)
-- Glacial (icy blues and whites)
-
-**P3 Wide Gamut** (for displays that support it):
-- P3 Electric
-- P3 Fire
-- P3 Ocean
+- Ember (red-orange-yellow)
+- Abyss (deep blues and teals)
+- Neon (cyan-magenta-green)
+- Aurora (green-blue-purple)
+- Graphite (black-to-white)
 
 ### Shading Modes
 
@@ -135,6 +137,13 @@ Click **Options** in System Settings → Screen Saver to customize:
 | **3D Blinn-Phong** | Simulated 3D surface with highlights and shadows |
 | **Angle-based** | Colors derived from escape angle for psychedelic effects |
 | **Stripe** | Orbital trap coloring with stripe patterns |
+
+### Visual Quality
+
+| Mode | Description |
+|------|-------------|
+| **Standard** | 1x rendering with conservative iteration caps |
+| **Ultra** | Retina-scale rendering, higher iteration caps, safer smoothing, and full 3D lighting |
 
 ---
 
@@ -150,7 +159,7 @@ Click **Options** in System Settings → Screen Saver to customize:
 ┌─────────────────────────────────────────────────────────────────┐
 │                      MandelbrotView.swift                        │
 │   - Animation state machine (zoom → fade out → fade in)         │
-│   - MTKViewDelegate for P3 rendering                            │
+│   - Direct CAMetalLayer rendering                               │
 │   - Curated zoom target locations                               │
 └─────────────────────────────────────────────────────────────────┘
                             │
@@ -159,19 +168,22 @@ Click **Options** in System Settings → Screen Saver to customize:
 ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
 │ Mandelbrot.metal │ │ Preferences.swift│ │ ConfigureSheet   │
 │ - GPU compute    │ │ - User settings  │ │ - Options UI     │
-│ - 24 palettes    │ │ - Persistence    │ │ - No XIB needed  │
+│ - 6 palettes     │ │ - Persistence    │ │ - No XIB needed  │
 │ - Julia mode     │ └──────────────────┘ └──────────────────┘
 │ - 4 shading modes│
-│ - dd_real math   │
+│ - Retina Ultra   │
+│ - perturbation   │
 └──────────────────┘
 ```
 
 **Key Design Decisions:**
 
 1. **Metal Compute Shaders** - Each pixel computed independently on GPU for maximum parallelism
-2. **MTKView for P3** - Uses `rgba16Float` pixel format and `displayP3` colorspace
-3. **Double-Float Precision** - Custom `dd_real` arithmetic for deep zooms without pixelation
-4. **Programmatic UI** - No XIB/NIB files, all configuration UI built in code
+2. **Typed Shader Uniforms** - Swift and Metal share one compact parameter layout for render state
+3. **Ultra Visual Quality** - Defaults to Retina-scale rendering and higher iteration caps for modern Apple Silicon
+4. **Direct CAMetalLayer Rendering** - Uses an sRGB `bgra8Unorm_srgb` Metal layer to avoid screensaver subview compositing issues
+5. **Perturbation-Assisted Deep Zooms** - Uses a CPU reference orbit and GPU perturbation path once the zoom gets deep
+6. **Programmatic UI** - No XIB/NIB files, all configuration UI built in code
 
 ---
 
@@ -197,12 +209,6 @@ Or manually copy `MandelbrotSaver.saver` to `~/Library/Screen Savers/`.
 **Cause:** GPU initialization can take a moment on first launch.
 
 **Solution:** Wait 2-3 seconds. If still black, try selecting a different screensaver and then re-selecting Mandelbrot.
-
-### Colors look washed out
-
-**Cause:** P3 palette selected on non-P3 display.
-
-**Solution:** In Options, choose a standard palette (Ultra Fractal, Fire, Ocean, Electric, Sunset, or Glacial).
 
 ### "Options" button is grayed out
 
@@ -254,15 +260,15 @@ Like any GPU-intensive task, it uses more power than a static screensaver. On la
 
 ### Can I use a specific zoom location?
 
-Not currently. The screensaver cycles through 8 curated beautiful locations. Adding custom locations would require modifying the source code.
+Not currently. The screensaver cycles through curated locations compiled into the source. Adding custom locations requires modifying the source code.
 
-### Why only 8 zoom targets?
+### Why curated zoom targets?
 
 Quality over quantity. Each location was hand-picked to look beautiful at all zoom levels without hitting precision limits. Adding arbitrary locations risks ugly artifacts.
 
 ### Does it work on Intel Macs?
 
-The build script currently targets Apple Silicon (arm64). For Intel Macs, modify `build.sh` to use `-target x86_64-apple-macosx12.0` instead.
+Yes. The source build creates a universal binary for Intel and Apple Silicon Macs.
 
 ---
 
@@ -270,7 +276,6 @@ The build script currently targets Apple Silicon (arm64). For Intel Macs, modify
 
 Pull requests welcome! Areas of interest:
 
-- Universal binary support (Intel + Apple Silicon)
 - Additional palettes
 - New shading modes
 - Performance optimizations

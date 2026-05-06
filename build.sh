@@ -10,6 +10,7 @@ CONTENTS_DIR="${BUNDLE_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 MODULE_CACHE_DIR="${TMPDIR:-/tmp}/mandelbrot-module-cache"
+BUILD_DIR="${TMPDIR:-/tmp}/mandelbrot-build"
 
 # Check for Xcode (required for Metal compiler)
 if [ -d "/Applications/Xcode.app" ]; then
@@ -26,16 +27,26 @@ else
     exit 1
 fi
 
+if ! xcrun -sdk macosx metal -v >/dev/null 2>&1; then
+    echo "❌ Error: Metal toolchain is not installed."
+    echo ""
+    echo "Install it with:"
+    echo "  xcodebuild -downloadComponent MetalToolchain"
+    exit 1
+fi
+
 echo "🔨 Building Mandelbrot Screensaver..."
 echo "   Using: $DEVELOPER_DIR"
 
 # Clean previous build
 rm -rf "$BUNDLE_DIR"
+rm -rf "$BUILD_DIR"
 
 # Create bundle structure
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
 mkdir -p "$MODULE_CACHE_DIR"
+mkdir -p "$BUILD_DIR"
 
 # Copy Info.plist
 cp Info.plist "${CONTENTS_DIR}/"
@@ -54,26 +65,38 @@ xcrun -sdk macosx metal -fmodules-cache-path="$MODULE_CACHE_DIR" -c Mandelbrot.m
 xcrun -sdk macosx metallib Mandelbrot.air -o "${RESOURCES_DIR}/default.metallib"
 rm Mandelbrot.air
 
-# Compile Swift code into a dynamic library
+# Compile Swift code into a universal dynamic library
 echo "🔧 Compiling Swift code..."
-swiftc \
-    -O \
-    -module-cache-path "$MODULE_CACHE_DIR" \
-    -target arm64-apple-macosx12.0 \
-    -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
-    -emit-library \
-    -o "${MACOS_DIR}/${BUNDLE_NAME}" \
-    -module-name "${BUNDLE_NAME}" \
-    -Xlinker -rpath -Xlinker @loader_path/../Frameworks \
-    -Xlinker -install_name -Xlinker "@rpath/${BUNDLE_NAME}" \
-    -framework ScreenSaver \
-    -framework Metal \
-    -framework AppKit \
-    -framework Foundation \
-    Preferences.swift \
-    DoubleDouble.swift \
-    ConfigureSheetController.swift \
+SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+SWIFT_SOURCES=(
+    Preferences.swift
+    DoubleDouble.swift
+    ConfigureSheetController.swift
     MandelbrotView.swift
+)
+
+for ARCH in arm64 x86_64; do
+    swiftc \
+        -O \
+        -module-cache-path "$MODULE_CACHE_DIR" \
+        -target "${ARCH}-apple-macosx12.0" \
+        -sdk "$SDK_PATH" \
+        -emit-library \
+        -o "${BUILD_DIR}/${BUNDLE_NAME}-${ARCH}" \
+        -module-name "${BUNDLE_NAME}" \
+        -Xlinker -rpath -Xlinker @loader_path/../Frameworks \
+        -Xlinker -install_name -Xlinker "@rpath/${BUNDLE_NAME}" \
+        -framework ScreenSaver \
+        -framework Metal \
+        -framework AppKit \
+        -framework Foundation \
+        "${SWIFT_SOURCES[@]}"
+done
+
+xcrun lipo -create \
+    "${BUILD_DIR}/${BUNDLE_NAME}-arm64" \
+    "${BUILD_DIR}/${BUNDLE_NAME}-x86_64" \
+    -output "${MACOS_DIR}/${BUNDLE_NAME}"
 
 # Ad-hoc sign so macOS allows Metal access in sandboxed screensaver process
 echo "🔏 Code signing..."
