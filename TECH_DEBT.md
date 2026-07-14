@@ -12,10 +12,9 @@ Last updated: 2026-07-12
   anchor rather than 0, where index-0 rebasing doesn't apply, so deep Julia frames can still show a
   smooth wrong-color blob from reference divergence (observed: San Marco at scale 3e-5). A critical-orbit
   Julia reference would enable rebasing but costs per-pixel delta precision at end-of-dive scales in
-  float32; revisit only if the artifact shows up noticeably in live runs. Cheap first thing to try:
-  `updateReferenceOrbit` computes the per-step residual (`ref.zw`) in Float32 arithmetic, where the
-  true residual is the same order as Float32 rounding noise — computing `Z_float² + c − Z_next_float`
-  in Double before rounding to Float would capture the cancellation exactly.
+  float32; revisit only if the artifact shows up noticeably in live runs. (The per-step residual
+  `ref.zw` is computed in double since 2026-07-14 — previously ~90% of it was Float32 rounding
+  noise — which removes one error source but not the underlying no-rebasing limitation.)
 - **Julia constant morphing is un-audited.** `juliaCx/Cy` orbit the curated constant on a circle of
   radius `min(0.004, 0.15 * scale)`. The dive-structure audit checks the static constant only; the
   scale-bounded radius keeps boundary displacement under ~15% of a view height, and the perturbation

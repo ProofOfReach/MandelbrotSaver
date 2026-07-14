@@ -47,9 +47,16 @@ private func makeReferenceOrbit(
 
     let nextZI = (zr * zi * two) + cIm
     let nextZR = (zr2 - zi2) + cRe
-    let iterZR = fzr * fzr - fzi * fzi + Float(cRe.hi)
-    let iterZI = 2.0 * fzr * fzi + Float(cIm.hi)
-    orbit[i] = SIMD4<Float>(fzr, fzi, iterZR - Float(nextZR.hi), iterZI - Float(nextZI.hi))
+    // Residual (Z_f² + c) − Z_next_f in double: the two sides agree to ~ULP,
+    // so a float evaluation leaves mostly rounding noise. Matches
+    // MandelbrotView.updateReferenceOrbit.
+    let dzr = Double(fzr)
+    let dzi = Double(fzi)
+    let iterZR = dzr * dzr - dzi * dzi + cRe.hi
+    let iterZI = 2.0 * dzr * dzi + cIm.hi
+    let deltaR = Float(iterZR - Double(Float(nextZR.hi)))
+    let deltaI = Float(iterZI - Double(Float(nextZI.hi)))
+    orbit[i] = SIMD4<Float>(fzr, fzi, deltaR, deltaI)
     zr = nextZR
     zi = nextZI
   }

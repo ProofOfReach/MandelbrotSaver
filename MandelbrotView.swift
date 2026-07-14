@@ -757,13 +757,17 @@ class MandelbrotView: ScreenSaverView {
             let f_next_zr = Float(next_zr.hi)
             let f_next_zi = Float(next_zi.hi)
 
-            let f_zr2 = f_zr * f_zr
-            let f_zi2 = f_zi * f_zi
-            let f_iter_zr = f_zr2 - f_zi2 + Float(c_real.hi)
-            let f_iter_zi = 2.0 * f_zr * f_zi + Float(c_imag.hi)
-
-            let delta_r = f_iter_zr - f_next_zr
-            let delta_i = f_iter_zi - f_next_zi
+            // Residual the shader adds each step so the delta recurrence
+            // stays consistent with the float-rounded orbit it iterates
+            // against: (Z_f² + c) − Z_next_f. The two sides agree to ~ULP,
+            // so the cancellation must happen in double — evaluated in float
+            // the residual is mostly rounding noise of its own magnitude.
+            let d_zr = Double(f_zr)
+            let d_zi = Double(f_zi)
+            let d_iter_zr = d_zr * d_zr - d_zi * d_zi + c_real.hi
+            let d_iter_zi = 2.0 * d_zr * d_zi + c_imag.hi
+            let delta_r = Float(d_iter_zr - Double(f_next_zr))
+            let delta_i = Float(d_iter_zi - Double(f_next_zi))
 
             pointer[i] = SIMD4<Float>(f_zr, f_zi, delta_r, delta_i)
 
