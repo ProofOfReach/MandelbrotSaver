@@ -2,7 +2,7 @@ import AppKit
 import ScreenSaver
 
 /// Controller for the screensaver configuration sheet
-/// Uses programmatic UI (no XIB) with NSStackView for layout
+/// Uses programmatic UI (no XIB) with NSStackView layout
 final class ConfigureSheetController: NSObject {
 
     // MARK: - Properties
@@ -11,19 +11,21 @@ final class ConfigureSheetController: NSObject {
     private var preferences = Preferences.shared
 
     // UI Elements
-    private var zoomSpeedSlider: NSSlider!
+    var zoomSpeedSlider: NSSlider!
     private var zoomSpeedLabel: NSTextField!
-    private var palettePopup: NSPopUpButton!
-    private var autoCycleCheckbox: NSButton!
-    private var visualQualityPopup: NSPopUpButton!
-    private var shadingModePopup: NSPopUpButton!
+    var palettePopup: NSPopUpButton!
+    var autoCycleCheckbox: NSButton!
+    var visualQualityPopup: NSPopUpButton!
+    var shadingModePopup: NSPopUpButton!
+    private var batterySaverCheckbox: NSButton!
     private var juliaModeCheckbox: NSButton!
+    private var previewView: MandelbrotView?
 
     // MARK: - Window Creation
 
     func configureSheet() -> NSWindow {
         let sheet = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
             styleMask: [.titled],
             backing: .buffered,
             defer: true
@@ -33,9 +35,11 @@ final class ConfigureSheetController: NSObject {
 
         let contentView = createContentView()
         sheet.contentView = contentView
+        sheet.setContentSize(contentView.fittingSize)
 
         window = sheet
         loadPreferences()
+        startPreview()
         return sheet
     }
 
@@ -45,40 +49,22 @@ final class ConfigureSheetController: NSObject {
         let mainStack = NSStackView()
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
-        mainStack.spacing = 16
+        mainStack.spacing = 14
         mainStack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
 
-        // Title
-        let titleLabel = createLabel("Mandelbrot Screensaver", bold: true, size: 14)
-        mainStack.addArrangedSubview(titleLabel)
+        mainStack.addArrangedSubview(createPreviewSection())
+        mainStack.addArrangedSubview(makeSeparator())
+        mainStack.addArrangedSubview(createMotionSection())
+        mainStack.addArrangedSubview(createAppearanceSection())
+        mainStack.addArrangedSubview(createQualityPowerSection())
+        mainStack.addArrangedSubview(createFractalSection())
+        mainStack.addArrangedSubview(makeSeparator())
+        mainStack.addArrangedSubview(createButtonRow())
+        mainStack.addArrangedSubview(createAboutRow())
 
-        // Zoom Speed Section
-        let zoomSection = createZoomSpeedSection()
-        mainStack.addArrangedSubview(zoomSection)
-
-        // Palette Section
-        let paletteSection = createPaletteSection()
-        mainStack.addArrangedSubview(paletteSection)
-
-        let qualitySection = createQualitySection()
-        mainStack.addArrangedSubview(qualitySection)
-
-        // Shading Section
-        let shadingSection = createShadingSection()
-        mainStack.addArrangedSubview(shadingSection)
-
-        // Julia Mode Section
-        let juliaSection = createJuliaSection()
-        mainStack.addArrangedSubview(juliaSection)
-
-        // Buttons
-        let buttonRow = createButtonRow()
-        mainStack.addArrangedSubview(buttonRow)
-
-        // Set up constraints
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 360))
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 560))
         containerView.addSubview(mainStack)
 
         NSLayoutConstraint.activate([
@@ -91,13 +77,45 @@ final class ConfigureSheetController: NSObject {
         return containerView
     }
 
-    private func createZoomSpeedSection() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
+    /// Small live-rendering preview so palette/shading/quality changes are visible immediately.
+    private func createPreviewSection() -> NSView {
+        let preview = MandelbrotView(frame: NSRect(x: 0, y: 0, width: 400, height: 170), isPreview: true)
+        previewView = preview
 
-        let headerLabel = createLabel("Zoom Speed", bold: true, size: 12)
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 8
+        container.layer?.masksToBounds = true
+
+        if let preview {
+            preview.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(preview)
+            NSLayoutConstraint.activate([
+                preview.topAnchor.constraint(equalTo: container.topAnchor),
+                preview.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                preview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                preview.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            ])
+        }
+
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        container.heightAnchor.constraint(equalToConstant: 170).isActive = true
+        return container
+    }
+
+    private func startPreview() {
+        guard let preview = previewView, !preview.isAnimating else { return }
+        preview.startAnimation()
+    }
+
+    private func stopPreview() {
+        guard let preview = previewView, preview.isAnimating else { return }
+        preview.stopAnimation()
+    }
+
+    private func createMotionSection() -> NSView {
+        let stack = sectionStack(titled: "Motion")
 
         let sliderRow = NSStackView()
         sliderRow.orientation = .horizontal
@@ -106,54 +124,27 @@ final class ConfigureSheetController: NSObject {
         let slowLabel = createLabel("Slow", bold: false, size: 11)
         slowLabel.textColor = .secondaryLabelColor
 
-        // Slider: left=slow (0.9975), right=fast (0.965) - we invert when reading
         zoomSpeedSlider = NSSlider(value: 0.5, minValue: 0.0, maxValue: 1.0, target: self, action: #selector(zoomSpeedChanged(_:)))
-        zoomSpeedSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        zoomSpeedSlider.widthAnchor.constraint(equalToConstant: 190).isActive = true
 
         let fastLabel = createLabel("Fast", bold: false, size: 11)
         fastLabel.textColor = .secondaryLabelColor
 
-        zoomSpeedLabel = createLabel("0.988", bold: false, size: 11)
-        zoomSpeedLabel.widthAnchor.constraint(equalToConstant: 50).isActive = true
+        zoomSpeedLabel = createLabel("", bold: false, size: 11)
+        zoomSpeedLabel.textColor = .secondaryLabelColor
+        zoomSpeedLabel.widthAnchor.constraint(equalToConstant: 130).isActive = true
 
         sliderRow.addArrangedSubview(slowLabel)
         sliderRow.addArrangedSubview(zoomSpeedSlider)
         sliderRow.addArrangedSubview(fastLabel)
         sliderRow.addArrangedSubview(zoomSpeedLabel)
 
-        stack.addArrangedSubview(headerLabel)
         stack.addArrangedSubview(sliderRow)
-
         return stack
     }
 
-    private func createQualitySection() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-
-        let headerLabel = createLabel("Visual Quality", bold: true, size: 12)
-
-        visualQualityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        visualQualityPopup.addItems(withTitles: Preferences.visualQualityNames)
-        visualQualityPopup.target = self
-        visualQualityPopup.action = #selector(visualQualityChanged(_:))
-        visualQualityPopup.widthAnchor.constraint(equalToConstant: 200).isActive = true
-
-        stack.addArrangedSubview(headerLabel)
-        stack.addArrangedSubview(visualQualityPopup)
-
-        return stack
-    }
-
-    private func createPaletteSection() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-
-        let headerLabel = createLabel("Color Palette", bold: true, size: 12)
+    private func createAppearanceSection() -> NSView {
+        let stack = sectionStack(titled: "Appearance")
 
         let paletteRow = NSStackView()
         paletteRow.orientation = .horizontal
@@ -163,56 +154,62 @@ final class ConfigureSheetController: NSObject {
         palettePopup.addItems(withTitles: Preferences.paletteNames)
         palettePopup.target = self
         palettePopup.action = #selector(paletteChanged(_:))
-        palettePopup.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        palettePopup.widthAnchor.constraint(equalToConstant: 180).isActive = true
 
         autoCycleCheckbox = NSButton(checkboxWithTitle: "Auto-cycle palettes", target: self, action: #selector(autoCycleChanged(_:)))
 
         paletteRow.addArrangedSubview(palettePopup)
         paletteRow.addArrangedSubview(autoCycleCheckbox)
-
-        stack.addArrangedSubview(headerLabel)
         stack.addArrangedSubview(paletteRow)
-
-        return stack
-    }
-
-    private func createShadingSection() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-
-        let headerLabel = createLabel("Shading Mode", bold: true, size: 12)
 
         shadingModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         shadingModePopup.addItems(withTitles: Preferences.shadingModeNames)
         shadingModePopup.target = self
         shadingModePopup.action = #selector(shadingModeChanged(_:))
-        shadingModePopup.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        shadingModePopup.widthAnchor.constraint(equalToConstant: 180).isActive = true
 
-        let descLabel = createLabel("3D Blinn-Phong provides realistic lighting with rotating light sources", bold: false, size: 10)
-        descLabel.textColor = .secondaryLabelColor
+        let shadingRow = NSStackView()
+        shadingRow.orientation = .horizontal
+        shadingRow.spacing = 10
+        shadingRow.addArrangedSubview(shadingModePopup)
 
-        stack.addArrangedSubview(headerLabel)
-        stack.addArrangedSubview(shadingModePopup)
-        stack.addArrangedSubview(descLabel)
+        let shadingDesc = createLabel("3D adds lighting with moving highlights", bold: false, size: 10)
+        shadingDesc.textColor = .secondaryLabelColor
+        shadingRow.addArrangedSubview(shadingDesc)
+        stack.addArrangedSubview(shadingRow)
 
         return stack
     }
 
-    private func createJuliaSection() -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
+    private func createQualityPowerSection() -> NSView {
+        let stack = sectionStack(titled: "Quality & Power")
 
-        let headerLabel = createLabel("Fractal Mode", bold: true, size: 12)
+        let qualityRow = NSStackView()
+        qualityRow.orientation = .horizontal
+        qualityRow.spacing = 10
 
+        visualQualityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        visualQualityPopup.addItems(withTitles: Preferences.visualQualityNames)
+        visualQualityPopup.target = self
+        visualQualityPopup.action = #selector(visualQualityChanged(_:))
+        visualQualityPopup.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        qualityRow.addArrangedSubview(visualQualityPopup)
+        stack.addArrangedSubview(qualityRow)
+
+        batterySaverCheckbox = NSButton(checkboxWithTitle: "Reduce quality on battery power", target: self, action: #selector(batterySaverChanged(_:)))
+        stack.addArrangedSubview(batterySaverCheckbox)
+
+        let desc = createLabel("Caps the frame rate and detail while on battery or in Low Power Mode", bold: false, size: 10)
+        desc.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(desc)
+
+        return stack
+    }
+
+    private func createFractalSection() -> NSView {
+        let stack = sectionStack(titled: "Fractal")
         juliaModeCheckbox = NSButton(checkboxWithTitle: "Julia set mode", target: self, action: #selector(juliaModeChanged(_:)))
-
-        stack.addArrangedSubview(headerLabel)
         stack.addArrangedSubview(juliaModeCheckbox)
-
         return stack
     }
 
@@ -222,7 +219,7 @@ final class ConfigureSheetController: NSObject {
         stack.spacing = 10
         stack.distribution = .fill
 
-        // Spacer to push buttons to the right
+        // Spacer to push buttons right
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -238,6 +235,31 @@ final class ConfigureSheetController: NSObject {
         stack.addArrangedSubview(okButton)
 
         return stack
+    }
+
+    private func createAboutRow() -> NSView {
+        let bundle = Bundle(for: ConfigureSheetController.self)
+        let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let label = createLabel("Mandelbrot Screensaver \(version) · GPU-rendered with Metal", bold: false, size: 10)
+        label.textColor = .tertiaryLabelColor
+        return label
+    }
+
+    private func sectionStack(titled title: String) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.addArrangedSubview(createLabel(title, bold: true, size: 12))
+        return stack
+    }
+
+    private func makeSeparator() -> NSView {
+        let box = NSBox()
+        box.boxType = .separator
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        return box
     }
 
     private func createLabel(_ text: String, bold: Bool, size: CGFloat) -> NSTextField {
@@ -273,12 +295,28 @@ final class ConfigureSheetController: NSObject {
 
         shadingModePopup.selectItem(at: min(preferences.shadingMode, shadingModePopup.numberOfItems - 1))
 
+        batterySaverCheckbox.state = preferences.batterySaver ? .on : .off
         juliaModeCheckbox.state = preferences.juliaMode ? .on : .off
     }
 
     private func updateZoomSpeedLabel() {
-        let pct = Int(zoomSpeedSlider.doubleValue * 100)
-        zoomSpeedLabel.stringValue = "\(pct)%"
+        let value = zoomSpeedSlider.doubleValue
+        let name: String
+        if value < 0.33 {
+            name = "Relaxed"
+        } else if value < 0.67 {
+            name = "Balanced"
+        } else {
+            name = "Fast"
+        }
+
+        // Mirror the saver's dive-duration estimate: frames to shrink from the
+        // starting scale (3.0) to a typical target depth (1e-7), at 60 steps/sec,
+        // clamped to the same 24-140s window used by the auto-pilot.
+        let speed = sliderToSpeed(value)
+        let frames = log(1e-7 / 3.0) / log(speed)
+        let seconds = min(max(frames / 60.0, 24.0), 140.0)
+        zoomSpeedLabel.stringValue = "\(name) · ~\(Int(seconds.rounded()))s dive"
     }
 
     // MARK: - Actions
@@ -304,6 +342,10 @@ final class ConfigureSheetController: NSObject {
         preferences.shadingMode = sender.indexOfSelectedItem
     }
 
+    @objc private func batterySaverChanged(_ sender: NSButton) {
+        preferences.batterySaver = (sender.state == .on)
+    }
+
     @objc private func juliaModeChanged(_ sender: NSButton) {
         preferences.juliaMode = (sender.state == .on)
     }
@@ -314,6 +356,8 @@ final class ConfigureSheetController: NSObject {
     }
 
     @objc private func closeSheet(_ sender: NSButton) {
+        stopPreview()
+        previewView = nil
         guard let window = window,
               let sheetParent = window.sheetParent else {
             window?.close()

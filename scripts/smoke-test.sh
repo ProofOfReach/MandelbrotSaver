@@ -27,8 +27,8 @@ if [[ "$BUNDLE_ID" != "com.proofofreach.MandelbrotSaver" ]]; then
 fi
 
 ARCHES="$(lipo -archs "$EXECUTABLE")"
-if [[ "$ARCHES" != *"arm64"* || "$ARCHES" != *"x86_64"* ]]; then
-    echo "Expected universal binary with arm64 and x86_64, got: $ARCHES"
+if [[ "$ARCHES" != *"arm64"* ]]; then
+    echo "Expected arm64 binary, got: $ARCHES"
     exit 1
 fi
 
@@ -48,6 +48,7 @@ struct ShaderUniforms {
     var view: SIMD4<Float>
     var mode: SIMD4<Float>
     var quality: SIMD4<Float>
+    var extra: SIMD4<Float>
 }
 
 guard CommandLine.arguments.count == 2 else {
@@ -90,16 +91,38 @@ guard let texture = device.makeTexture(descriptor: descriptor),
     fatalError("unable to allocate render probe resources")
 }
 
+// 1x1 black stand-in for the freeze-dissolve held-frame texture (blend
+// weight is 0, so it is bound but never blended).
+let heldDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+    pixelFormat: .rgba16Float,
+    width: 1,
+    height: 1,
+    mipmapped: false
+)
+heldDescriptor.usage = [.shaderRead]
+heldDescriptor.storageMode = .shared
+guard let heldDummy = device.makeTexture(descriptor: heldDescriptor) else {
+    fatalError("unable to allocate held-frame stand-in texture")
+}
+var heldZero: UInt64 = 0
+withUnsafeBytes(of: &heldZero) { bytes in
+    heldDummy.replace(
+        region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+        withBytes: bytes.baseAddress!, bytesPerRow: 8)
+}
+
 var uniforms = ShaderUniforms(
     geometry: SIMD4<Float>(-0.5, 0.0, 3.0, 160.0),
     palette: SIMD4<Float>(0.0, Float(width) / Float(height), 0.0, 0.0),
     view: SIMD4<Float>(0.0, 0.0, 0.0, 0.0),
-    mode: SIMD4<Float>(1.0, 0.0, 0.0, 0.0),
-    quality: SIMD4<Float>(1.0, 1.0, 0.0, 0.0)
+    mode: SIMD4<Float>(0.0, 0.0, 0.0, 0.0),
+    quality: SIMD4<Float>(1.0, 1.0, 1.0, 0.0),
+    extra: SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
 )
 
 encoder.setComputePipelineState(pipeline)
 encoder.setTexture(texture, index: 0)
+encoder.setTexture(heldDummy, index: 1)
 encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
 encoder.setBuffer(referenceBuffer, offset: 0, index: 1)
 encoder.dispatchThreadgroups(
@@ -140,6 +163,18 @@ swiftc \
     -o "${PROBE_DIR}/MetalProbe"
 
 "${PROBE_DIR}/MetalProbe" "$METALLIB"
+
+swiftc \
+    -target "$(uname -m)-apple-macosx12.0" \
+    -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+    -framework Foundation \
+    -framework Metal \
+    DoubleDouble.swift \
+    FractalTargets.swift \
+    scripts/RenderAudit.swift \
+    -o "${PROBE_DIR}/RenderAudit"
+
+"${PROBE_DIR}/RenderAudit" "$METALLIB"
 
 cat > "${PROBE_DIR}/BundleProbe.swift" <<'SWIFT'
 import AppKit

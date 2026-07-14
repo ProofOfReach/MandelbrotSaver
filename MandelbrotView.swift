@@ -2,10 +2,15 @@ import ScreenSaver
 import Metal
 import QuartzCore
 import simd
+import IOKit.ps
 
 @objc(MandelbrotView)
 class MandelbrotView: ScreenSaverView {
     // Use a CAMetalLayer directly on ScreenSaverView; avoids legacyScreenSaver subview compositing issues.
+    // Pacing stays on ScreenSaverView's animateOneFrame timer (no CVDisplayLink): display-link teardown
+    // is fragile in the out-of-process legacyScreenSaver host, and CAMetalLayer's nextDrawable()
+    // back-pressure already vsync-locks presentation. ProMotion is reached by matching
+    // animationTimeInterval to the screen's maximumFramesPerSecond.
     private let preferDirectMetalLayer = true
 
     // MARK: - Metal
@@ -13,16 +18,34 @@ class MandelbrotView: ScreenSaverView {
     private var commandQueue: MTLCommandQueue?
     private var computePipelineFloat: MTLComputePipelineState?
     private var computePipelinePerturbation: MTLComputePipelineState?
+    // Orbit uploads rotate through a small ring so the CPU never rewrites a
+    // buffer that a still-in-flight frame may be reading (Julia morphing and
+    // the approach pan recompute the orbit every frame; up to
+    // maximumDrawableCount frames plus a transition capture can be in flight).
+    private var referenceOrbitBuffers: [MTLBuffer?] = [nil, nil, nil, nil]
+    private var referenceOrbitRingIndex = 0
+    /// The ring slot holding the most recent orbit; bound by encodeFractal.
     private var referenceOrbitBuffer: MTLBuffer?
-    private var qualityProbeTexture: MTLTexture?
-    private var qualityProbePixels: [UInt8] = []
+
+    private struct OrbitKey {
+        var centerXHi: Double, centerXLo: Double
+        var centerYHi: Double, centerYLo: Double
+        var julia: Bool, juliaCx: Double, juliaCy: Double
+        var length: Int
+    }
+    private var cachedOrbitKey: OrbitKey?
+    /// Iterations before the reference orbit escapes (== requested length if
+    /// it never escapes). Past this the buffer is zero-padded and the
+    /// perturbation math silently drops `c`, so rendering must not exceed it.
+    private var referenceOrbitValidLength: Int = 0
 
     private struct ShaderUniforms {
         var geometry: SIMD4<Float> // centerX_hi, centerY_hi, scale, maxIterations
         var palette: SIMD4<Float>  // colorOffset, aspectRatio, paletteIndex, paletteMix
         var view: SIMD4<Float>     // centerX_lo, centerY_lo, shadingMode, time
-        var mode: SIMD4<Float>     // opacity, juliaMode, juliaCx, juliaCy
-        var quality: SIMD4<Float>  // aaSamples, lightingQuality, reserved, reserved
+        var mode: SIMD4<Float>     // heldBlendWeight, juliaMode, juliaCx, juliaCy
+        var quality: SIMD4<Float>  // aaSamples, lightingQuality, edrHeadroom, rotationAngle
+        var extra: SIMD4<Float>    // referenceOrbitValidLength, reserved, reserved, reserved
     }
 
     // Direct display path
@@ -37,15 +60,20 @@ class MandelbrotView: ScreenSaverView {
     // MARK: - Configuration Sheet
     private lazy var configureSheetController = ConfigureSheetController()
 
-    // MARK: - Transition State for Smooth Fades
+    // MARK: - Transition State for Freeze-Dissolve Between Dives
+    // Instead of fading through black, the outgoing dive's last frame is
+    // captured into heldTexture and the incoming dive dissolves in over it.
     private enum TransitionState {
         case zooming
-        case fadingOut
-        case fadingIn
+        case capturePending
     }
     private var transitionState: TransitionState = .zooming
-    private var transitionOpacity: Float = 1.0
-    private let fadeSpeed: Float = 0.02
+    /// 0 → 1 while dissolving away from the held frame; >= 1 means idle.
+    private var crossfadeProgress: Float = 1.0
+    private let crossfadeDuration: CFAbsoluteTime = 1.4
+    private var heldTexture: MTLTexture?
+    /// 1x1 black texture bound whenever no real held frame should be read.
+    private var dummyHeldTexture: MTLTexture?
 
     // MARK: - Zoom State
     private var centerX: DoubleDouble = DoubleDouble(-0.5)
@@ -59,7 +87,6 @@ class MandelbrotView: ScreenSaverView {
 
     // Animation parameters (loaded from preferences)
     private var zoomSpeed: DoubleDouble = DoubleDouble(0.985)
-    private let panSpeed: DoubleDouble = DoubleDouble(0.015)
 
     // Visual effects
     private var colorOffset: Float = 0.0
@@ -69,27 +96,36 @@ class MandelbrotView: ScreenSaverView {
     private var shadingMode: Int = 0
     private var visualQuality: Int = 1
     private var time: Float = 0.0
+    // Slow view rotation; direction and rate re-rolled per dive.
+    private var rotationAngle: Float = 0.0
+    private var rotationSpeed: Float = 0.012
+    // Display EDR headroom (1.0 on SDR panels), refreshed with the power poll.
+    private var edrHeadroom: Float = 1.0
     private var autoCyclePalettes: Bool = true
     private var lastPreferenceReload: CFAbsoluteTime = 0
     private var lastLoadedPalettePreference: Int?
     private var lastLoadedAutoCyclePreference: Bool?
     private var lastFrameTime: CFAbsoluteTime = 0
-    private var lastQualityProbeTime: CFAbsoluteTime = 0
-    private var poorQualityFrameCount: Int = 0
     private var slowFrameCount: Int = 0
     private var zoomStartTime: CFAbsoluteTime = 0
     private let minZoomDuration: CFAbsoluteTime = 24
     private let maxZoomDuration: CFAbsoluteTime = 140
     private let paletteCycleDuration: CFAbsoluteTime = 18
-    private let qualityProbeInterval: CFAbsoluteTime = 0.75
-    private let qualityProbeWidth = 96
-    private let qualityProbeHeight = 64
+
+    // MARK: - Power State
+    // On battery or in Low Power Mode we cap refresh at 60Hz, lower render
+    // scale, and disable supersampling so the saver doesn't drain laptops.
+    // Iteration caps stay intact: reducing them can turn near-boundary Julia
+    // windows into a solid palette field with no visible fractal.
+    private var powerConstrained: Bool = false
+    private var lastPowerCheck: CFAbsoluteTime = 0
+    private let powerCheckInterval: CFAbsoluteTime = 2.0
 
     private struct RenderPolicy {
-        let antialiasSamples: Int
-        let lightingQuality: Int
-        let maxFloatIterations: Int
-        let maxPerturbationIterations: Int
+        var lightingQuality: Int
+        var maxFloatIterations: Int
+        var maxPerturbationIterations: Int
+        var aaSamples: Int
     }
 
     // MARK: - Julia Set Mode
@@ -97,55 +133,34 @@ class MandelbrotView: ScreenSaverView {
     private var juliaMode: Bool = false
     private var juliaCx: Double = 0.0
     private var juliaCy: Double = 0.0
+    // The curated constant this dive orbits around; juliaCx/Cy morph on a
+    // small circle whose radius shrinks with the zoom scale, so the set
+    // visibly "breathes" at every depth without leaving the audited anchor.
+    private var juliaBaseCx: Double = 0.0
+    private var juliaBaseCy: Double = 0.0
+    private var juliaMorphPhase: Double = 0.0
 
-    // Interesting Julia c values for visually striking fractals
-    private let interestingJuliaC: [(cx: Double, cy: Double, name: String)] = [
-        (-0.7, 0.27015, "Classic Spiral"),
-        (-0.4, 0.6, "Dendrite"),
-        (0.285, 0.01, "Snail Shell"),
-        (-0.8, 0.156, "Rabbit"),
-        (-0.70176, -0.3842, "Dragon"),
-        (0.285, 0.535, "Galaxy"),
-        (-0.835, -0.2321, "Lightning"),
-        (-0.1, 0.651, "Seahorse Tail"),
-        (-0.74543, 0.11301, "Seahorse Julia"),
-        (0.0, -0.8, "San Marco"),
-        (-1.476, 0.0, "Cauliflower"),
-        (-0.12, -0.77, "Starfish"),
-        (0.28, 0.008, "Siegel Disk"),
-        (-0.194, 0.6557, "Pinwheel"),
-        (-0.12, 0.74, "Spiral Galaxy"),
-        (0.3, 0.5, "Feathers")
-    ]
+    private let interestingJuliaC = FractalTargets.julia
+    private let interestingPoints = FractalTargets.mandelbrot
 
-    // MARK: - Interesting zoom targets
-    // Curated for screensaver value: dense structure, low empty-center risk, and stable real-time depth.
-    private let interestingPoints: [(x: String, y: String, minScale: String, name: String)] = [
-        ("-0.7445388635959773", "0.1217247190726782", "1e-7", "Seahorse Valley Deep Spiral"),
-        ("-0.7451968299999999", "0.10186988500000009", "1e-6", "Seahorse Valley Classic"),
-        ("-0.7463", "0.1102", "1e-5", "Seahorse Valley Wide"),
-        ("0.2777323864244548", "0.0073446267400780795", "1e-6", "Elephant Trunk"),
-        ("0.33698444648740383", "0.048778219678026105", "1e-6", "Elephant Eye"),
-        ("-0.0875937321188787", "0.6550902802386774", "1e-6", "Triple Spiral Valley"),
-        ("-0.5360670633819427", "-0.5255257785409202", "1e-6", "Turbulence"),
-        ("-0.22163951090127437", "-0.7115537848292754", "1e-6", "LSD Spiral"),
-        ("0.452721018749286", "0.39649427698014", "1e-6", "Galaxies"),
-        ("0.35787121400640803", "-0.10813970113434704", "1e-6", "Carousel Spirals"),
-        ("-0.16070135", "1.0375665", "1e-5", "Sunburst"),
-        ("-1.25066", "0.02012", "1e-6", "Scepter Valley"),
-        ("-0.1528", "1.0397", "1e-5", "Period-3 Boundary"),
-        ("-0.374004139", "-0.659792175", "1e-5", "Starfish Filament"),
-        ("-0.749767676767", "0.020113113113", "1e-6", "Triple Spiral Tendril"),
-        ("-1.249783", "0.029353", "1e-6", "Scepter Double-Hook"),
-        ("-1.2494989", "0.0303330", "1e-7", "Scepter Hook Core"),
-        ("-0.7528585928145695", "0.04314319321653719", "1e-6", "Hidden Teddy Boundary"),
-        ("0.36024044343761436", "-0.6413130610648032", "1e-6", "Eye of the Universe"),
-        ("0.274", "0.482", "1e-5", "Quad Spiral Cusp"),
-        ("-0.1267", "0.8442", "1e-5", "Double Scepter Valley"),
-    ]
+    // Next dive's Julia anchor, boundary-searched on a background queue so
+    // selectRandomTarget() never runs the multi-ms search on the animation
+    // thread. The slot is kept warm even in Mandelbrot mode so toggling the
+    // Julia preference mid-run also finds a ready anchor.
+    private struct PreparedJuliaAnchor {
+        let constantIndex: Int
+        let x: Double
+        let y: Double
+    }
+    private var preparedJuliaAnchor: PreparedJuliaAnchor?
+    private var juliaAnchorSearchInFlight = false
+    private let juliaAnchorLock = NSLock()
+    private let juliaAnchorQueue = DispatchQueue(
+        label: "MandelbrotSaver.julia-anchor", qos: .utility)
 
     private var currentTargetIndex: Int = 0
     private var zoomCount: Int = 0
+    private var diveStartScale: Double = 3.0
 
     // MARK: - Initialization
 
@@ -156,7 +171,8 @@ class MandelbrotView: ScreenSaverView {
         observePreferenceChanges()
         setupMetal()
         selectRandomTarget()
-        animationTimeInterval = 1.0 / 60.0
+        refreshPowerState()
+        updateAnimationPacing()
     }
 
     required init?(coder: NSCoder) {
@@ -166,7 +182,8 @@ class MandelbrotView: ScreenSaverView {
         observePreferenceChanges()
         setupMetal()
         selectRandomTarget()
-        animationTimeInterval = 1.0 / 60.0
+        refreshPowerState()
+        updateAnimationPacing()
     }
 
     deinit {
@@ -175,6 +192,67 @@ class MandelbrotView: ScreenSaverView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        updateAnimationPacing()
+        updateMetalLayerGeometry()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateAnimationPacing()
+        updateMetalLayerGeometry()
+    }
+
+    // MARK: - Frame Pacing & Power
+
+    /// Native refresh rate of the screen hosting this view (120 on ProMotion).
+    private var displayMaxFramesPerSecond: Int {
+        let fps = window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
+        return max(fps, 30)
+    }
+
+    /// Target refresh: native rate on AC, capped at 60 when power-constrained.
+    private func updateAnimationPacing() {
+        let fps = powerConstrained ? min(displayMaxFramesPerSecond, 60) : displayMaxFramesPerSecond
+        animationTimeInterval = 1.0 / Double(fps)
+        metalLayer?.maximumDrawableCount = powerConstrained ? 2 : 3
+    }
+
+    /// Current display EDR headroom, capped so highlights sparkle without
+    /// searing at night. 1.0 on SDR panels (tonemap knees at the top of SDR).
+    private func refreshEDRHeadroom() {
+        let screen = window?.screen ?? NSScreen.main
+        let headroom = screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0
+        edrHeadroom = Float(min(max(Double(headroom), 1.0), 2.0))
+    }
+
+    /// True when running on battery power or Low Power Mode is enabled,
+    /// and the user hasn't opted out via the Battery Saver preference.
+    private func refreshPowerState() {
+        refreshEDRHeadroom()
+        guard Preferences.shared.batterySaver else {
+            setPowerConstrained(false)
+            return
+        }
+
+        if ProcessInfo.processInfo.isLowPowerModeEnabled {
+            setPowerConstrained(true)
+            return
+        }
+
+        var onBattery = false
+        if let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+           // Get rule: the returned string is not owned by us — takeUnretainedValue.
+           let sourceType = IOPSGetProvidingPowerSourceType(snapshot)?.takeUnretainedValue() as String? {
+            onBattery = (sourceType == kIOPSBatteryPowerValue)
+        }
+        setPowerConstrained(onBattery)
+    }
+
+    private func setPowerConstrained(_ constrained: Bool) {
+        guard constrained != powerConstrained else { return }
+        powerConstrained = constrained
+        updateAnimationPacing()
+        lastTextureSize = .zero
         updateMetalLayerGeometry()
     }
 
@@ -215,20 +293,26 @@ class MandelbrotView: ScreenSaverView {
     }
 
     private var renderPolicy: RenderPolicy {
+        var policy: RenderPolicy
         if visualQuality >= 1 {
-            return RenderPolicy(
-                antialiasSamples: 1,
+            policy = RenderPolicy(
                 lightingQuality: 2,
                 maxFloatIterations: 650,
-                maxPerturbationIterations: 1200
+                maxPerturbationIterations: 1600,
+                aaSamples: 4
+            )
+        } else {
+            policy = RenderPolicy(
+                lightingQuality: 1,
+                maxFloatIterations: 450,
+                maxPerturbationIterations: 1000,
+                aaSamples: 1
             )
         }
-        return RenderPolicy(
-            antialiasSamples: 1,
-            lightingQuality: 1,
-            maxFloatIterations: 450,
-            maxPerturbationIterations: 900
-        )
+        if powerConstrained {
+            policy.aaSamples = 1
+        }
+        return policy
     }
 
     private func observePreferenceChanges() {
@@ -289,9 +373,13 @@ class MandelbrotView: ScreenSaverView {
     private func setupDirectMetalLayer(device: MTLDevice) {
         let layer = CAMetalLayer()
         layer.device = device
-        layer.pixelFormat = .bgra8Unorm_srgb
+        // 16-bit float, linear extended-sRGB: no 8-bit banding anywhere in
+        // the pipeline, and components > 1.0 light up EDR headroom on XDR
+        // panels (the shader tonemaps into the queried headroom).
+        layer.pixelFormat = .rgba16Float
         layer.framebufferOnly = false
-        layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        layer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        layer.wantsExtendedDynamicRangeContent = true
         layer.isOpaque = true
         layer.maximumDrawableCount = 3
 
@@ -328,7 +416,8 @@ class MandelbrotView: ScreenSaverView {
         }
 
         let backingScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-        return min(max(backingScale, 1.0), 2.0)
+        let cap: CGFloat = powerConstrained ? 1.5 : 2.0
+        return min(max(backingScale, 1.0), cap)
     }
 
     private func createFallbackTextureIfNeeded() {
@@ -344,7 +433,9 @@ class MandelbrotView: ScreenSaverView {
         let height = max(1, Int(size.height))
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
+            // Match the direct CAMetalLayer path. The shader outputs linear
+            // light and relies on an sRGB target to encode display values.
+            pixelFormat: .bgra8Unorm_srgb,
             width: width,
             height: height,
             mipmapped: false
@@ -368,31 +459,101 @@ class MandelbrotView: ScreenSaverView {
 
         zoomCount += 1
         slowFrameCount = 0
-        poorQualityFrameCount = 0
         zoomStartTime = CFAbsoluteTimeGetCurrent()
 
         if juliaEnabled {
             juliaMode = true
-            let juliaIndex = Int.random(in: 0..<interestingJuliaC.count)
-            let juliaC = interestingJuliaC[juliaIndex]
-            juliaCx = juliaC.cx
-            juliaCy = juliaC.cy
-            centerX = DoubleDouble(0.0)
-            centerY = DoubleDouble(0.0)
-            targetCenterX = DoubleDouble(0.0)
-            targetCenterY = DoubleDouble(0.0)
+            // Zoom toward a point ON the Julia set boundary. Several curated
+            // constants have set-interior at the origin, so diving into (0,0)
+            // ended black; the boundary is fractal everywhere, so it always
+            // has structure at depth. The anchor was boundary-searched in the
+            // background during the previous dive; the inline fallback only
+            // fires on the very first selection after init or a mode toggle.
+            let anchor = takePreparedJuliaAnchor() ?? searchJuliaAnchorNow()
+            let juliaC = interestingJuliaC[anchor.constantIndex]
+            juliaBaseCx = juliaC.cx
+            juliaBaseCy = juliaC.cy
+            juliaMorphPhase = Double.random(in: 0..<(2.0 * .pi))
+            juliaCx = juliaBaseCx
+            juliaCy = juliaBaseCy
+            targetCenterX = DoubleDouble(anchor.x)
+            targetCenterY = DoubleDouble(anchor.y)
+            // Julia anchors are precision-fragile (the reference orbit and
+            // budget depend on the exact boundary point), so Julia dives
+            // start centered rather than panning in.
+            centerX = targetCenterX
+            centerY = targetCenterY
             targetScale = DoubleDouble(3e-5)
+            diveStartScale = 3.0
         } else {
             juliaMode = false
             let target = interestingPoints[currentTargetIndex]
             targetCenterX = DoubleDouble(target.x)
             targetCenterY = DoubleDouble(target.y)
             targetScale = DoubleDouble(target.minScale)
-            centerX = targetCenterX
-            centerY = targetCenterY
+            // Targets whose approach crosses a black bottleneck open below it
+            // (see MandelbrotTarget.startScale) so no shown frame is a black
+            // screen or a featureless color wash.
+            diveStartScale = Double(target.startScale) ?? 3.0
+            // Off-center approach: open with the anchor away from screen
+            // center and let the pan easing carry it in, so dives aren't all
+            // fixed-center zooms. The offset is a fraction of the start scale
+            // (anchor stays comfortably on screen) and decays in view units
+            // (see updateAnimation), so it can never outrun the zoom.
+            let offsetAngle = Double.random(in: 0..<(2.0 * .pi))
+            let offsetMag = 0.18 * diveStartScale
+            centerX = targetCenterX + DoubleDouble(cos(offsetAngle) * offsetMag * 1.4)
+            centerY = targetCenterY + DoubleDouble(sin(offsetAngle) * offsetMag)
         }
 
-        scale = DoubleDouble(3.0)
+        // Fresh slow-rotation direction and rate for this dive.
+        rotationSpeed = Float(Double.random(in: 0.006...0.018)) * (Bool.random() ? 1.0 : -1.0)
+
+        scale = DoubleDouble(diveStartScale)
+        prepareNextJuliaAnchor()
+    }
+
+    /// Consumes the background-prepared Julia anchor, if one is ready.
+    private func takePreparedJuliaAnchor() -> PreparedJuliaAnchor? {
+        juliaAnchorLock.lock()
+        defer { juliaAnchorLock.unlock() }
+        let anchor = preparedJuliaAnchor
+        preparedJuliaAnchor = nil
+        return anchor
+    }
+
+    /// Boundary-searches the next dive's Julia anchor on a background queue.
+    /// No-op while a result is already waiting or a search is running.
+    private func prepareNextJuliaAnchor() {
+        juliaAnchorLock.lock()
+        if preparedJuliaAnchor != nil || juliaAnchorSearchInFlight {
+            juliaAnchorLock.unlock()
+            return
+        }
+        juliaAnchorSearchInFlight = true
+        juliaAnchorLock.unlock()
+
+        let constantIndex = Int.random(in: 0..<interestingJuliaC.count)
+        let constant = interestingJuliaC[constantIndex]
+        juliaAnchorQueue.async { [weak self] in
+            let point = JuliaAnchor.boundaryPoint(cx: constant.cx, cy: constant.cy)
+            guard let self else { return }
+            self.juliaAnchorLock.lock()
+            self.preparedJuliaAnchor = PreparedJuliaAnchor(
+                constantIndex: constantIndex, x: point.x, y: point.y)
+            self.juliaAnchorSearchInFlight = false
+            self.juliaAnchorLock.unlock()
+        }
+    }
+
+    /// Inline anchor search, used only when no background result is ready
+    /// (first selection after init, or a Julia toggle racing the first
+    /// prepare). A few ms of CPU.
+    private func searchJuliaAnchorNow() -> PreparedJuliaAnchor {
+        let constantIndex = Int.random(in: 0..<interestingJuliaC.count)
+        let constant = interestingJuliaC[constantIndex]
+        let point = JuliaAnchor.boundaryPoint(cx: constant.cx, cy: constant.cy)
+        return PreparedJuliaAnchor(constantIndex: constantIndex, x: point.x, y: point.y)
     }
 
     private func updateAnimation() {
@@ -413,44 +574,60 @@ class MandelbrotView: ScreenSaverView {
         lastFrameTime = now
         let frameScale = frameDelta * 60.0
         reloadPreferencesIfNeeded(now: now)
+        refreshPowerStateIfNeeded(now: now)
 
         switch transitionState {
         case .zooming:
             let zoomElapsed = now - zoomStartTime
-            if slowFrameCount >= 3 || zoomElapsed > zoomDurationLimit {
+            let diveFinished = scale.hi < targetScale.hi * 2.0
+            let diveStalled = (slowFrameCount >= 3 || zoomElapsed > zoomDurationLimit)
+                && crossfadeProgress >= 1.0
+            if diveFinished || diveStalled {
                 slowFrameCount = 0
-                transitionState = .fadingOut
+                // renderFrame captures the outgoing frame into heldTexture,
+                // selects the next target, and starts the dissolve.
+                transitionState = .capturePending
+            } else {
+                scale = scale * pow(zoomSpeed.hi, frameScale)
+
+                // Off-center approach: decay the center → anchor offset a
+                // touch faster than the zoom shrinks the view, so the anchor
+                // glides toward screen center and can never fall behind the
+                // zoom at any configured speed. Snap once sub-pixel so the
+                // perturbation orbit cache stops missing.
+                let dx = centerX - targetCenterX
+                let dy = centerY - targetCenterY
+                if max(abs(dx.hi), abs(dy.hi)) < scale.hi * 2e-4 {
+                    centerX = targetCenterX
+                    centerY = targetCenterY
+                } else {
+                    let keep = pow(zoomSpeed.hi * 0.995, frameScale)
+                    centerX = targetCenterX + dx * keep
+                    centerY = targetCenterY + dy * keep
+                }
             }
 
-            scale = scale * pow(zoomSpeed.hi, frameScale)
-
-            let dx = targetCenterX - centerX
-            let dy = targetCenterY - centerY
-            let panFactor = 1.0 - pow(1.0 - panSpeed.hi, frameScale)
-            centerX = centerX + (dx * panFactor)
-            centerY = centerY + (dy * panFactor)
-
-            if scale.hi < targetScale.hi * 2.0 {
-                transitionState = .fadingOut
-            }
-
-        case .fadingOut:
-            transitionOpacity -= fadeSpeed * Float(frameScale)
-            if transitionOpacity <= 0.0 {
-                transitionOpacity = 0.0
-                selectRandomTarget()
-                transitionState = .fadingIn
-            }
-
-        case .fadingIn:
-            transitionOpacity += fadeSpeed * Float(frameScale)
-            if transitionOpacity >= 1.0 {
-                transitionOpacity = 1.0
-                transitionState = .zooming
-            }
+        case .capturePending:
+            break
         }
 
-        colorOffset += Float(frameDelta * 18.0)
+        if crossfadeProgress < 1.0 {
+            crossfadeProgress = min(crossfadeProgress + Float(frameDelta / crossfadeDuration), 1.0)
+        }
+
+        rotationAngle += rotationSpeed * Float(frameDelta)
+
+        if juliaMode {
+            // Morph the Julia constant on a small circle; the radius shrinks
+            // with the view so the structural "flow" stays gentle on screen
+            // and the audited boundary anchor remains valid at depth.
+            juliaMorphPhase += frameDelta * 0.3
+            let radius = min(0.004, 0.15 * scale.hi)
+            juliaCx = juliaBaseCx + radius * cos(juliaMorphPhase)
+            juliaCy = juliaBaseCy + radius * sin(juliaMorphPhase)
+        }
+
+        colorOffset += Float(frameDelta * 8.0)
         if colorOffset > 10000.0 {
             colorOffset = 0.0
         }
@@ -461,7 +638,16 @@ class MandelbrotView: ScreenSaverView {
                 paletteTimer = paletteTimer.truncatingRemainder(dividingBy: 1.0)
                 currentPalette = (currentPalette + 1) % Preferences.paletteNames.count
             }
-            paletteMix = paletteTimer
+            // Dwell on each palette, then a short smoothstep crossfade at the
+            // end of the cycle. The previous linear full-cycle ramp kept the
+            // display in muddy two-palette blends almost all of the time.
+            let fadeStart: Float = 0.8
+            if paletteTimer <= fadeStart {
+                paletteMix = 0.0
+            } else {
+                let f = (paletteTimer - fadeStart) / (1.0 - fadeStart)
+                paletteMix = f * f * (3.0 - 2.0 * f)
+            }
         } else {
             paletteMix = 0.0
         }
@@ -469,15 +655,23 @@ class MandelbrotView: ScreenSaverView {
         time += Float(frameDelta)
     }
 
+    // Same-process changes arrive via Preferences.didChangeNotification; this
+    // slow poll only catches writes from another process (System Settings).
     private func reloadPreferencesIfNeeded(now: CFAbsoluteTime) {
-        guard now - lastPreferenceReload >= 0.25 else { return }
+        guard now - lastPreferenceReload >= 5.0 else { return }
         lastPreferenceReload = now
         loadPreferences()
     }
 
+    private func refreshPowerStateIfNeeded(now: CFAbsoluteTime) {
+        guard now - lastPowerCheck >= powerCheckInterval else { return }
+        lastPowerCheck = now
+        refreshPowerState()
+    }
+
     private var zoomDurationLimit: CFAbsoluteTime {
         let target = max(targetScale.hi * 2.0, 1e-12)
-        let start = 3.0
+        let start = diveStartScale
         let speed = min(max(zoomSpeed.hi, 0.0001), 0.9999)
         let estimatedFrames = log(target / start) / log(speed)
         let estimatedSeconds = estimatedFrames / 60.0
@@ -489,12 +683,30 @@ class MandelbrotView: ScreenSaverView {
     private func updateReferenceOrbit(maxIterations: Int) {
         guard let device = metalDevice else { return }
 
-        let bufferLength = maxIterations * MemoryLayout<SIMD4<Float>>.size
-        if referenceOrbitBuffer == nil || referenceOrbitBuffer!.length < bufferLength {
-            referenceOrbitBuffer = device.makeBuffer(length: bufferLength, options: .storageModeShared)
+        // The reference orbit depends only on the anchor point (center / Julia c)
+        // and length. The auto-pilot pins the center to the target for the whole
+        // zoom, so this cache makes the DD orbit a once-per-target cost instead
+        // of a per-frame one.
+        if let cached = cachedOrbitKey,
+           cached.centerXHi == centerX.hi, cached.centerXLo == centerX.lo,
+           cached.centerYHi == centerY.hi, cached.centerYLo == centerY.lo,
+           cached.julia == juliaMode,
+           cached.juliaCx == juliaCx, cached.juliaCy == juliaCy,
+           cached.length >= maxIterations,
+           referenceOrbitBuffer != nil {
+            return
         }
 
-        guard let buffer = referenceOrbitBuffer else { return }
+        let bufferLength = maxIterations * MemoryLayout<SIMD4<Float>>.size
+        let nextIndex = (referenceOrbitRingIndex + 1) % referenceOrbitBuffers.count
+        var slot = referenceOrbitBuffers[nextIndex]
+        if slot == nil || slot!.length < bufferLength {
+            slot = device.makeBuffer(length: bufferLength, options: .storageModeShared)
+            referenceOrbitBuffers[nextIndex] = slot
+        }
+        guard let buffer = slot else { return }
+        referenceOrbitRingIndex = nextIndex
+        referenceOrbitBuffer = buffer
         let pointer = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: maxIterations)
 
         let cx = centerX
@@ -528,12 +740,16 @@ class MandelbrotView: ScreenSaverView {
             let zr2 = cur_zr * cur_zr
             let zi2 = cur_zi * cur_zi
 
-            if zr2.hi + zi2.hi > 4.0 {
+            // Same escape radius (256) as the shader, so pixels that shadow
+            // the reference can escape at the exact matching index.
+            if zr2.hi + zi2.hi > 65536.0 {
+                referenceOrbitValidLength = i
                 for j in i..<maxIterations {
                     pointer[j] = SIMD4<Float>(0, 0, 0, 0)
                 }
                 break
             }
+            referenceOrbitValidLength = i + 1
 
             let next_zi = (cur_zr * cur_zi * two) + c_imag
             let next_zr = (zr2 - zi2) + c_real
@@ -554,6 +770,13 @@ class MandelbrotView: ScreenSaverView {
             cur_zr = next_zr
             cur_zi = next_zi
         }
+
+        cachedOrbitKey = OrbitKey(
+            centerXHi: centerX.hi, centerXLo: centerX.lo,
+            centerYHi: centerY.hi, centerYLo: centerY.lo,
+            julia: juliaMode, juliaCx: juliaCx, juliaCy: juliaCy,
+            length: maxIterations
+        )
     }
 
     private struct RenderTarget {
@@ -574,205 +797,213 @@ class MandelbrotView: ScreenSaverView {
         return RenderTarget(texture: texture, drawable: nil, size: size)
     }
 
-    private func makeUniforms(width: Int, height: Int, maxIterations: Int, policy: RenderPolicy) -> ShaderUniforms {
+    private func makeUniforms(width: Int, height: Int, maxIterations: Int, policy: RenderPolicy, heldWeight: Float) -> ShaderUniforms {
         let aspectRatio = Float(width) / Float(max(height, 1))
         return ShaderUniforms(
             geometry: SIMD4<Float>(Float(centerX.hi), Float(centerY.hi), Float(scale.hi), Float(maxIterations)),
             palette: SIMD4<Float>(colorOffset, aspectRatio, Float(currentPalette), paletteMix),
             view: SIMD4<Float>(Float(centerX.lo), Float(centerY.lo), Float(shadingMode), time),
-            mode: SIMD4<Float>(transitionOpacity, juliaMode ? 1.0 : 0.0, Float(juliaCx), Float(juliaCy)),
-            quality: SIMD4<Float>(Float(policy.antialiasSamples), Float(policy.lightingQuality), 0.0, 0.0)
+            mode: SIMD4<Float>(heldWeight, juliaMode ? 1.0 : 0.0, Float(juliaCx), Float(juliaCy)),
+            quality: SIMD4<Float>(Float(policy.aaSamples), Float(policy.lightingQuality), edrHeadroom, rotationAngle),
+            extra: SIMD4<Float>(Float(referenceOrbitValidLength), 0.0, 0.0, 0.0)
         )
     }
 
-    private func createQualityProbeTextureIfNeeded() {
-        guard qualityProbeTexture == nil, let device = metalDevice else { return }
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb,
-            width: qualityProbeWidth,
-            height: qualityProbeHeight,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderWrite, .shaderRead]
-        descriptor.storageMode = .shared
-
-        qualityProbeTexture = device.makeTexture(descriptor: descriptor)
-        qualityProbePixels = [UInt8](repeating: 0, count: qualityProbeWidth * qualityProbeHeight * 4)
+    private struct FramePlan {
+        let pipeline: MTLComputePipelineState
+        let maxIterations: Int
+        let policy: RenderPolicy
     }
 
-    private func shouldEndForVisualQuality(
-        pipeline: MTLComputePipelineState,
-        maxIterations: Int,
-        policy: RenderPolicy,
-        now: CFAbsoluteTime
-    ) -> Bool {
-        guard transitionState == .zooming,
-              now - lastQualityProbeTime >= qualityProbeInterval,
-              let commandBuffer = commandQueue?.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            return false
+    /// Picks the precision path and iteration budget for the current state,
+    /// refreshing the reference orbit when the perturbation path is chosen.
+    private func planFrame(textureHeight: Int) -> FramePlan? {
+        let currentScale = scale.hi
+        let policy = renderPolicy
+
+        // Skip the DD tier for real-time — it's too slow per-pixel. Hand off
+        // from float32 to perturbation while float still has margin: c
+        // quantizes to the ULP at the center's magnitude, so switch as soon
+        // as a pixel spans fewer than ~8 quanta on this display. (A fixed
+        // 1e-4 handoff left up to a half-decade of visibly blocky frames for
+        // targets with |c| > 1 on Retina panels.) Perturbation costs about
+        // the same per iteration, so switching early is safe.
+        let coordinateMagnitude = max(abs(centerX.hi), abs(centerY.hi)) + currentScale
+        let ulp = Double(Float(coordinateMagnitude).ulp)
+        let handoffScale = min(5e-3, max(1e-4, 8.0 * ulp * Double(max(textureHeight, 1))))
+        let usePerturbation = currentScale <= handoffScale
+
+        // The float-path depth ramp, tuned for the Mandelbrot exterior
+        // approach. Julia dives anchor to boundary points whose mid-dive
+        // windows can need most of the anchor's escape time well before the
+        // handoff (audited: Pinwheel needs p95≈556 at scale 9.5e-4, where the
+        // ramp gives ~300 — a black screen), so Julia frames get the full
+        // float budget. Also the anchor the perturbation ramp continues from,
+        // so the handoff frame has budget continuity (no detail "pop" when
+        // crossing the precision boundary).
+        func floatBudget(at scale: Double) -> Int {
+            if juliaMode { return policy.maxFloatIterations }
+            let depth = max(0.0, log10(3.0 / scale))
+            return min(policy.maxFloatIterations, 220 + Int(depth * 24.0))
         }
 
-        lastQualityProbeTime = now
-        createQualityProbeTextureIfNeeded()
-        guard let texture = qualityProbeTexture else { return false }
+        let pipeline: MTLComputePipelineState?
+        let maxIterations: Int
+        if usePerturbation {
+            // Compute at the full cap so the cached orbit stays valid for the
+            // entire zoom into this target.
+            updateReferenceOrbit(maxIterations: policy.maxPerturbationIterations)
+            pipeline = computePipelinePerturbation
+            // Continue the float ramp from the handoff, doubling the budget
+            // per decade of further depth: full cap by end-of-dive scales
+            // (curated views need median escape counts of 300-1400) with no
+            // single-frame jump at the handoff.
+            let decadesPast = max(0.0, log10(handoffScale / max(currentScale, 1e-300)))
+            let ramp = Double(floatBudget(at: handoffScale)) * pow(2.0, decadesPast)
+            var budget = min(policy.maxPerturbationIterations, max(Int(ramp), 64))
+            if juliaMode {
+                // Julia references can't rebase (their orbit starts at the
+                // anchor, not 0), so the budget must never exceed the orbit's
+                // pre-escape length — past it the zero-padded buffer silently
+                // drops c from the recurrence. No 64-iteration floor here for
+                // the same reason. Mandelbrot wraps via rebasing instead.
+                budget = min(budget, max(referenceOrbitValidLength, 1))
+            }
+            maxIterations = budget
+        } else {
+            pipeline = computePipelineFloat
+            maxIterations = floatBudget(at: currentScale)
+        }
+        guard let pipeline else { return nil }
+        return FramePlan(pipeline: pipeline, maxIterations: maxIterations, policy: policy)
+    }
 
-        var uniforms = makeUniforms(
-            width: qualityProbeWidth,
-            height: qualityProbeHeight,
-            maxIterations: maxIterations,
-            policy: policy
-        )
+    private func ensureDummyHeldTexture() -> MTLTexture? {
+        if let dummy = dummyHeldTexture { return dummy }
+        guard let device = metalDevice else { return nil }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        var zero: UInt64 = 0
+        withUnsafeBytes(of: &zero) { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                withBytes: bytes.baseAddress!, bytesPerRow: 8)
+        }
+        dummyHeldTexture = texture
+        return texture
+    }
 
-        encoder.setComputePipelineState(pipeline)
-        encoder.setTexture(texture, index: 0)
-        encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
+    private func ensureHeldTexture(width: Int, height: Int) -> MTLTexture? {
+        if let held = heldTexture, held.width == width, held.height == height {
+            return held
+        }
+        guard let device = metalDevice, width > 0, height > 0 else { return nil }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .private
+        heldTexture = device.makeTexture(descriptor: descriptor)
+        return heldTexture
+    }
+
+    private func encodeFractal(
+        into texture: MTLTexture,
+        held: MTLTexture,
+        heldWeight: Float,
+        plan: FramePlan,
+        commandBuffer: MTLCommandBuffer
+    ) -> Bool {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
 
         if referenceOrbitBuffer == nil {
             referenceOrbitBuffer = metalDevice?.makeBuffer(length: 16, options: .storageModeShared)
         }
-        if let refBuffer = referenceOrbitBuffer {
-            encoder.setBuffer(refBuffer, offset: 0, index: 1)
+        guard let refBuffer = referenceOrbitBuffer else {
+            encoder.endEncoding()
+            return false
         }
+
+        var uniforms = makeUniforms(
+            width: texture.width,
+            height: texture.height,
+            maxIterations: plan.maxIterations,
+            policy: plan.policy,
+            heldWeight: heldWeight
+        )
+
+        encoder.setComputePipelineState(plan.pipeline)
+        encoder.setTexture(texture, index: 0)
+        encoder.setTexture(held, index: 1)
+        encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
+        encoder.setBuffer(refBuffer, offset: 0, index: 1)
 
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         let threadGroups = MTLSize(
-            width: (qualityProbeWidth + threadGroupSize.width - 1) / threadGroupSize.width,
-            height: (qualityProbeHeight + threadGroupSize.height - 1) / threadGroupSize.height,
+            width: (texture.width + threadGroupSize.width - 1) / threadGroupSize.width,
+            height: (texture.height + threadGroupSize.height - 1) / threadGroupSize.height,
             depth: 1
         )
 
         encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
         encoder.endEncoding()
+        return true
+    }
+
+    /// Renders the outgoing dive's frame into heldTexture so the next dive
+    /// can dissolve in over it. Returns false when no direct-layer target is
+    /// available (the fallback path cuts hard instead).
+    private func captureOutgoingFrame() -> Bool {
+        guard let layer = metalLayer, let commandQueue else { return false }
+        let size = layer.drawableSize
+        guard let held = ensureHeldTexture(width: Int(size.width), height: Int(size.height)),
+              let dummy = ensureDummyHeldTexture(),
+              let plan = planFrame(textureHeight: held.height),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              encodeFractal(into: held, held: dummy, heldWeight: 0.0, plan: plan, commandBuffer: commandBuffer)
+        else { return false }
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        if commandBuffer.error != nil {
-            poorQualityFrameCount += 1
-            return poorQualityFrameCount >= 2
-        }
-
-        texture.getBytes(
-            &qualityProbePixels,
-            bytesPerRow: qualityProbeWidth * 4,
-            from: MTLRegionMake2D(0, 0, qualityProbeWidth, qualityProbeHeight),
-            mipmapLevel: 0
-        )
-
-        var nonBlack = 0
-        var bright = 0
-        var sum = 0.0
-        var sumSquares = 0.0
-        let pixelCount = qualityProbeWidth * qualityProbeHeight
-
-        for offset in stride(from: 0, to: qualityProbePixels.count, by: 4) {
-            let b = Double(qualityProbePixels[offset]) / 255.0
-            let g = Double(qualityProbePixels[offset + 1]) / 255.0
-            let r = Double(qualityProbePixels[offset + 2]) / 255.0
-            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            if luminance > 0.025 { nonBlack += 1 }
-            if luminance > 0.20 { bright += 1 }
-            sum += luminance
-            sumSquares += luminance * luminance
-        }
-
-        let count = Double(pixelCount)
-        let mean = sum / count
-        let variance = max(0.0, (sumSquares / count) - mean * mean)
-        let nonBlackRatio = Double(nonBlack) / count
-        let brightRatio = Double(bright) / count
-
-        let mostlyEmpty = nonBlackRatio < 0.06 || brightRatio < 0.015
-        let collapsedContrast = nonBlackRatio < 0.20 && variance < 0.0012
-        let tooDeep = scale.hi < targetScale.hi * 3.0
-
-        if tooDeep || mostlyEmpty || collapsedContrast {
-            poorQualityFrameCount += 1
-        } else {
-            poorQualityFrameCount = 0
-        }
-
-        return poorQualityFrameCount >= 2
+        return true
     }
 
     // Returns true if NSView draw() should be triggered for CPU fallback presentation.
     @discardableResult
     private func renderFrame() -> Bool {
-        guard let commandQueue,
-              let target = acquireRenderTarget() else {
+        guard let commandQueue else { return false }
+
+        // Dive boundary: freeze the outgoing frame, move to the next target,
+        // and dissolve into it. Hard cut when capture isn't possible.
+        if transitionState == .capturePending {
+            let captured = captureOutgoingFrame()
+            selectRandomTarget()
+            transitionState = .zooming
+            crossfadeProgress = captured ? 0.0 : 1.0
+        }
+
+        guard let target = acquireRenderTarget(),
+              let plan = planFrame(textureHeight: target.texture.height),
+              let dummy = ensureDummyHeldTexture(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
             return false
         }
 
-        let depth = max(0.0, log10(3.0 / scale.hi))
-        let currentScale = scale.hi
-        let policy = renderPolicy
-
-        // Skip DD tier for real-time — it's too slow per-pixel.
-        // Go directly from float to perturbation at scale <= 1e-6.
-        let usePerturbation = currentScale <= 1e-6
-        let pipeline: MTLComputePipelineState?
-        let maxIterations: Int
-        if usePerturbation {
-            pipeline = computePipelinePerturbation
-            maxIterations = min(policy.maxPerturbationIterations, Int(320 + depth * 36))
-        } else {
-            pipeline = computePipelineFloat
-            maxIterations = min(policy.maxFloatIterations, Int(220 + depth * 24))
-        }
-        let iterCount = maxIterations
-
-        guard let pipeline,
-              let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            return false
+        var held: MTLTexture = dummy
+        var heldWeight: Float = 0.0
+        if crossfadeProgress < 1.0, target.drawable != nil,
+           let heldFrame = heldTexture,
+           heldFrame.width == target.texture.width,
+           heldFrame.height == target.texture.height {
+            let p = crossfadeProgress
+            heldWeight = 1.0 - (p * p * (3.0 - 2.0 * p))
+            held = heldFrame
         }
 
-        if usePerturbation {
-            updateReferenceOrbit(maxIterations: iterCount)
-        }
-
-        if shouldEndForVisualQuality(
-            pipeline: pipeline,
-            maxIterations: maxIterations,
-            policy: policy,
-            now: CFAbsoluteTimeGetCurrent()
-        ) {
-            transitionState = .fadingOut
-            poorQualityFrameCount = 0
-        }
-
-        var uniforms = makeUniforms(
-            width: target.texture.width,
-            height: target.texture.height,
-            maxIterations: maxIterations,
-            policy: policy
-        )
-
-        encoder.setComputePipelineState(pipeline)
-        encoder.setTexture(target.texture, index: 0)
-        encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
-
-        if usePerturbation, let refBuffer = referenceOrbitBuffer {
-            encoder.setBuffer(refBuffer, offset: 0, index: 1)
-        } else {
-            if referenceOrbitBuffer == nil {
-                referenceOrbitBuffer = metalDevice?.makeBuffer(length: 16, options: .storageModeShared)
-            }
-            if let refBuffer = referenceOrbitBuffer {
-                encoder.setBuffer(refBuffer, offset: 0, index: 1)
-            }
-        }
-
-        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        let threadGroups = MTLSize(
-            width: (target.texture.width + threadGroupSize.width - 1) / threadGroupSize.width,
-            height: (target.texture.height + threadGroupSize.height - 1) / threadGroupSize.height,
-            depth: 1
-        )
-
-        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
-        encoder.endEncoding()
+        guard encodeFractal(
+            into: target.texture, held: held, heldWeight: heldWeight,
+            plan: plan, commandBuffer: commandBuffer)
+        else { return false }
 
         if let drawable = target.drawable {
             commandBuffer.present(drawable)

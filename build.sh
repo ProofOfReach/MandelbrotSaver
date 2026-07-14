@@ -61,42 +61,37 @@ fi
 
 # Compile Metal shader to .air then to .metallib
 echo "📐 Compiling Metal shader..."
-xcrun -sdk macosx metal -fmodules-cache-path="$MODULE_CACHE_DIR" -c Mandelbrot.metal -o Mandelbrot.air
+xcrun -sdk macosx metal -O2 -ffast-math -fmodules-cache-path="$MODULE_CACHE_DIR" -c Mandelbrot.metal -o Mandelbrot.air
 xcrun -sdk macosx metallib Mandelbrot.air -o "${RESOURCES_DIR}/default.metallib"
 rm Mandelbrot.air
 
-# Compile Swift code into a universal dynamic library
+# Compile Swift code (Apple Silicon only)
 echo "🔧 Compiling Swift code..."
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 SWIFT_SOURCES=(
     Preferences.swift
     DoubleDouble.swift
+    FractalTargets.swift
     ConfigureSheetController.swift
     MandelbrotView.swift
 )
 
-for ARCH in arm64 x86_64; do
-    swiftc \
-        -O \
-        -module-cache-path "$MODULE_CACHE_DIR" \
-        -target "${ARCH}-apple-macosx12.0" \
-        -sdk "$SDK_PATH" \
-        -emit-library \
-        -o "${BUILD_DIR}/${BUNDLE_NAME}-${ARCH}" \
-        -module-name "${BUNDLE_NAME}" \
-        -Xlinker -rpath -Xlinker @loader_path/../Frameworks \
-        -Xlinker -install_name -Xlinker "@rpath/${BUNDLE_NAME}" \
-        -framework ScreenSaver \
-        -framework Metal \
-        -framework AppKit \
-        -framework Foundation \
-        "${SWIFT_SOURCES[@]}"
-done
-
-xcrun lipo -create \
-    "${BUILD_DIR}/${BUNDLE_NAME}-arm64" \
-    "${BUILD_DIR}/${BUNDLE_NAME}-x86_64" \
-    -output "${MACOS_DIR}/${BUNDLE_NAME}"
+swiftc \
+    -O \
+    -module-cache-path "$MODULE_CACHE_DIR" \
+    -target "arm64-apple-macosx12.0" \
+    -sdk "$SDK_PATH" \
+    -emit-library \
+    -o "${MACOS_DIR}/${BUNDLE_NAME}" \
+    -module-name "${BUNDLE_NAME}" \
+    -Xlinker -rpath -Xlinker @loader_path/../Frameworks \
+    -Xlinker -install_name -Xlinker "@rpath/${BUNDLE_NAME}" \
+    -framework ScreenSaver \
+    -framework Metal \
+    -framework AppKit \
+    -framework Foundation \
+    -framework IOKit \
+    "${SWIFT_SOURCES[@]}"
 
 # Ad-hoc sign so macOS allows Metal access in sandboxed screensaver process
 echo "🔏 Code signing..."

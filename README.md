@@ -23,17 +23,18 @@
 
 **The Problem**: macOS screensavers are boring. The built-in options are static images or basic animations. Third-party fractal viewers are either outdated, slow, or cost money.
 
-**The Solution**: A free, GPU-accelerated Mandelbrot/Julia set screensaver that renders beautiful deep zooms at 60fps using Apple's Metal framework.
+**The Solution**: A free, GPU-accelerated Mandelbrot/Julia set screensaver that renders beautiful deep zooms at up to 120fps on ProMotion displays using Apple's Metal framework.
 
 ### Why Use This?
 
 | Feature | What It Does |
 |---------|--------------|
-| **60fps Metal Rendering** | Buttery smooth zooms powered by your Mac's GPU |
-| **Curated Color Palettes** | Six distinct looks instead of a long list of near-duplicates |
-| **Julia Set Mode** | Switches from Mandelbrot targets to curated Julia constants |
-| **Rich Color Palettes** | Distinct sRGB palettes tuned for smooth fractal coloring |
-| **3D Lighting** | Optional Blinn-Phong shading with specular highlights |
+| **ProMotion Metal Rendering** | Buttery smooth zooms at the display's native refresh rate (up to 120Hz), adaptive on battery |
+| **Deep-Color / EDR Output** | 16-bit float pipeline (no banding) with highlights that use XDR headroom where available |
+| **Curated Color Palettes** | Six distinct looks, cyclic gradients with dwell-and-dissolve auto-cycling |
+| **Julia Set Mode** | Curated Julia constants that gently morph while you dive |
+| **3D Lighting** | Optional Blinn-Phong shading with depth-stable relief normals |
+| **Living Camera** | Off-center approach pans, slow rotation, and freeze-dissolve transitions between dives |
 | **Zero Config** | Works beautifully out of the box, customize if you want |
 
 ---
@@ -99,7 +100,7 @@ Build options:
 ./scripts/smoke-test.sh # Build and verify bundle, signing, architectures, and Metal library
 ```
 
-`build.sh` creates a universal Intel/Apple Silicon binary. If the Metal toolchain is missing, install it with:
+`build.sh` builds an Apple Silicon (arm64) binary. If the Metal toolchain is missing, install it with:
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain
@@ -158,7 +159,7 @@ Click **Options** in System Settings → Screen Saver to customize:
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      MandelbrotView.swift                        │
-│   - Animation state machine (zoom → fade out → fade in)         │
+│   - Animation state machine (zoom → freeze-dissolve → zoom)     │
 │   - Direct CAMetalLayer rendering                               │
 │   - Curated zoom target locations                               │
 └─────────────────────────────────────────────────────────────────┘
@@ -181,8 +182,8 @@ Click **Options** in System Settings → Screen Saver to customize:
 1. **Metal Compute Shaders** - Each pixel computed independently on GPU for maximum parallelism
 2. **Typed Shader Uniforms** - Swift and Metal share one compact parameter layout for render state
 3. **Ultra Visual Quality** - Defaults to Retina-scale rendering and higher iteration caps for modern Apple Silicon
-4. **Direct CAMetalLayer Rendering** - Uses an sRGB `bgra8Unorm_srgb` Metal layer to avoid screensaver subview compositing issues
-5. **Perturbation-Assisted Deep Zooms** - Uses a CPU reference orbit and GPU perturbation path once the zoom gets deep
+4. **Direct CAMetalLayer Rendering** - A 16-bit float (`rgba16Float`) extended-linear-sRGB Metal layer: band-free gradients, EDR highlights on XDR panels, and no screensaver subview compositing issues
+5. **Perturbation-Assisted Deep Zooms** - A CPU reference orbit with a GPU perturbation path (Zhuoran-style rebasing on Mandelbrot dives) once float32 precision runs out; the handoff point adapts to display resolution and target coordinates
 6. **Programmatic UI** - No XIB/NIB files, all configuration UI built in code
 
 ---
@@ -268,7 +269,7 @@ Quality over quantity. Each location was hand-picked to look beautiful at all zo
 
 ### Does it work on Intel Macs?
 
-Yes. The source build creates a universal binary for Intel and Apple Silicon Macs.
+No. Current releases target Apple Silicon (arm64) only. The last universal (Intel + Apple Silicon) build predates the ProMotion/power-adaptive rendering work.
 
 ---
 
