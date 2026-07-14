@@ -1,8 +1,15 @@
 # Tech Debt
 
-Last updated: 2026-07-12
+Last updated: 2026-07-14
 
 ## Further room for improvement (not yet done)
+
+- **Governor floor may still miss 30fps on weaker GPUs.** The performance governor (added 2026-07-14
+  after live dives kept aborting: deep frames measured up to ~1s on an M4 at 3024×1964, tripping the
+  slow-frame bailout) steps supersampling off and internal resolution down to 0.375× but never touches
+  iteration budgets, since those change the audited image. On the M4 the floor's worst frame is 28ms;
+  an M1 at 5K could still sit below 30fps at maximum depth. If that shows up, the next rung is a
+  per-target iteration hint (below), not a global budget cut.
 
 - **Per-target iteration hints.** Each curated `interestingPoints` entry could carry an audited
   "expected p90 escape iterations" value instead of relying on the generic depth-based formula — would
@@ -29,6 +36,7 @@ Last updated: 2026-07-12
   primaries. An opt-in "treat palette values as P3" saturation boost remains possible if wanted.
 - **Live on-screen verification still pending.** All changes were verified offline (build, render
   probes, CPU escape-time audit at every half-decade of every dive, GPU end-of-dive renders across
-  shading modes ×  iteration policies). Not yet tested on a live display: ProMotion pacing at 120Hz,
-  EDR headroom behavior on XDR vs SDR panels, freeze-dissolve pacing, adaptive-supersampling cost at
-  5K, battery/Low Power Mode transitions, and the overall visual impression over an extended run.
+  shading modes × iteration policies, and a full-dive GPU frame-time sweep at native resolution).
+  Not yet tested on a live display: ProMotion pacing at 120Hz, EDR headroom behavior on XDR vs SDR
+  panels, freeze-dissolve pacing, governor level transitions (visible resolution steps?),
+  battery/Low Power Mode transitions, and the overall visual impression over an extended run.

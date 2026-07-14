@@ -121,6 +121,37 @@ class MandelbrotView: ScreenSaverView {
     private var lastPowerCheck: CFAbsoluteTime = 0
     private let powerCheckInterval: CFAbsoluteTime = 2.0
 
+    // MARK: - Performance Governor
+    // Deep frames are expensive (measured on an M4 at 3024×1964: up to ~1s
+    // at the 1600-iteration cap with 4× supersampling — 106 of 238 audited
+    // dive frames exceeded 80ms). No fixed quality setting fits every GPU
+    // and every depth, so a closed loop watches measured GPU frame time and
+    // steps down a quality ladder (supersampling off, then internal
+    // resolution) to hold ~30fps, stepping back up when frames are cheap.
+    // Iteration budgets are never reduced: cutting them changes what the
+    // fractal looks like (audited), while resolution/AA only soften it.
+    private struct GovernorLevel {
+        let scaleFactor: CGFloat
+        let allowSupersampling: Bool
+    }
+    private static let governorLevels: [GovernorLevel] = [
+        GovernorLevel(scaleFactor: 1.0, allowSupersampling: true),
+        GovernorLevel(scaleFactor: 1.0, allowSupersampling: false),
+        GovernorLevel(scaleFactor: 0.75, allowSupersampling: false),
+        GovernorLevel(scaleFactor: 0.5, allowSupersampling: false),
+        GovernorLevel(scaleFactor: 0.375, allowSupersampling: false),
+    ]
+    private var governorIndex: Int = 0
+    private var governorLastChange: CFAbsoluteTime = 0
+    private var gpuTimeEMA: Double = 0
+    private let gpuTimeLock = NSLock()
+    private var latestGPUFrameTime: Double = 0
+    // Step down above 33ms (below ~30fps), back up below 12ms, with a dwell
+    // so a single resize/orbit hitch doesn't thrash the drawable size.
+    private let governorHighBudget: Double = 0.033
+    private let governorLowBudget: Double = 0.012
+    private let governorDwell: CFAbsoluteTime = 2.0
+
     private struct RenderPolicy {
         var lightingQuality: Int
         var maxFloatIterations: Int
@@ -309,7 +340,7 @@ class MandelbrotView: ScreenSaverView {
                 aaSamples: 1
             )
         }
-        if powerConstrained {
+        if powerConstrained || !Self.governorLevels[governorIndex].allowSupersampling {
             policy.aaSamples = 1
         }
         return policy
@@ -417,7 +448,8 @@ class MandelbrotView: ScreenSaverView {
 
         let backingScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         let cap: CGFloat = powerConstrained ? 1.5 : 2.0
-        return min(max(backingScale, 1.0), cap)
+        let base = min(max(backingScale, 1.0), cap)
+        return base * Self.governorLevels[governorIndex].scaleFactor
     }
 
     private func createFallbackTextureIfNeeded() {
@@ -563,7 +595,11 @@ class MandelbrotView: ScreenSaverView {
         if lastFrameTime > 0 {
             let dt = now - lastFrameTime
             frameDelta = min(max(dt, 1.0 / 120.0), 0.1)
-            if dt > 0.08 { // slower than ~12fps
+            // True-stall detector only. Expected load (deep frames on a slow
+            // GPU) is the governor's job; with 0.08s here every deep dive
+            // got aborted mid-way and the saver degenerated into an endless
+            // shallow zoom-pan-dissolve loop.
+            if dt > 0.4 {
                 slowFrameCount += 1
             } else {
                 slowFrameCount = 0
@@ -575,12 +611,16 @@ class MandelbrotView: ScreenSaverView {
         let frameScale = frameDelta * 60.0
         reloadPreferencesIfNeeded(now: now)
         refreshPowerStateIfNeeded(now: now)
+        updateGovernor(now: now)
 
         switch transitionState {
         case .zooming:
             let zoomElapsed = now - zoomStartTime
             let diveFinished = scale.hi < targetScale.hi * 2.0
-            let diveStalled = (slowFrameCount >= 3 || zoomElapsed > zoomDurationLimit)
+            // Stalls only count once the governor has nothing left to give;
+            // while it's still stepping down, slow frames are being handled.
+            let governorAtFloor = governorIndex == Self.governorLevels.count - 1
+            let diveStalled = ((slowFrameCount >= 3 && governorAtFloor) || zoomElapsed > zoomDurationLimit)
                 && crossfadeProgress >= 1.0
             if diveFinished || diveStalled {
                 slowFrameCount = 0
@@ -674,8 +714,43 @@ class MandelbrotView: ScreenSaverView {
         let start = diveStartScale
         let speed = min(max(zoomSpeed.hi, 0.0001), 0.9999)
         let estimatedFrames = log(target / start) / log(speed)
-        let estimatedSeconds = estimatedFrames / 60.0
+        // 1.25× grace: frameDelta is clamped to 0.1s, so heavy frames make
+        // zoom progress lag wall time a little — without slack the dive
+        // would be cut just before reaching depth.
+        let estimatedSeconds = estimatedFrames / 60.0 * 1.25
         return min(max(estimatedSeconds, minZoomDuration), maxZoomDuration)
+    }
+
+    /// Closed-loop quality control: folds the latest measured GPU frame time
+    /// into an EMA and walks the governor ladder to hold the frame budget.
+    /// Level changes resize the drawable, which breaks held-frame dissolve
+    /// dimensions, so they only happen between crossfades and after a dwell.
+    private func updateGovernor(now: CFAbsoluteTime) {
+        gpuTimeLock.lock()
+        let sample = latestGPUFrameTime
+        latestGPUFrameTime = 0
+        gpuTimeLock.unlock()
+        if sample > 0 {
+            gpuTimeEMA = gpuTimeEMA == 0 ? sample : gpuTimeEMA * 0.8 + sample * 0.2
+        }
+
+        guard gpuTimeEMA > 0,
+              crossfadeProgress >= 1.0,
+              now - governorLastChange >= governorDwell else { return }
+
+        var newIndex = governorIndex
+        if gpuTimeEMA > governorHighBudget, governorIndex < Self.governorLevels.count - 1 {
+            newIndex += 1
+        } else if gpuTimeEMA < governorLowBudget, governorIndex > 0 {
+            newIndex -= 1
+        }
+        guard newIndex != governorIndex else { return }
+        governorIndex = newIndex
+        governorLastChange = now
+        // Old-level samples no longer describe the new cost; re-measure.
+        gpuTimeEMA = 0
+        lastTextureSize = .zero
+        updateMetalLayerGeometry()
     }
 
     // MARK: - Perturbation Theory Helper
@@ -1011,6 +1086,17 @@ class MandelbrotView: ScreenSaverView {
 
         if let drawable = target.drawable {
             commandBuffer.present(drawable)
+            // Feed the performance governor. The handler runs on Metal's
+            // completion queue; the animation thread consumes the sample on
+            // its next tick.
+            commandBuffer.addCompletedHandler { [weak self] cb in
+                guard let self else { return }
+                let gpuTime = cb.gpuEndTime - cb.gpuStartTime
+                guard gpuTime > 0 else { return }
+                self.gpuTimeLock.lock()
+                self.latestGPUFrameTime = gpuTime
+                self.gpuTimeLock.unlock()
+            }
             commandBuffer.commit()
             return false
         }
