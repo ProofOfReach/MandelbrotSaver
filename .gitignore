@@ -1,7 +1,10 @@
 # Build artifacts
 *.saver/
+*.app/
 *.air
 *.metallib
+.codex-outputs/
+.codex/
 
 # macOS
 .DS_Store

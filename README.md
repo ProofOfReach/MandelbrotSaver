@@ -1,91 +1,42 @@
-# Mandelbrot Screensaver
+# Metal Screensavers for macOS
 
 <div align="center">
 
-![Mandelbrot Fractal](thumbnail.png)
+![Hyperspace Bloom mandala](thumbnail@2x.png)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![macOS 12+](https://img.shields.io/badge/macOS-12.0+-blue.svg)](https://www.apple.com/macos/)
-[![Metal](https://img.shields.io/badge/Metal-GPU%20Accelerated-orange.svg)](https://developer.apple.com/metal/)
-[![GitHub release](https://img.shields.io/github/v/release/ProofOfReach/MandelbrotSaver)](https://github.com/ProofOfReach/MandelbrotSaver/releases)
+**Two GPU-rendered screensavers: Hyperspace Bloom and Mandelbrot Saver**
 
-**Real-time GPU-rendered Mandelbrot and Julia set screensaver for macOS**
-
-### Quick Install
-
-[Download Latest Release](https://github.com/ProofOfReach/MandelbrotSaver/releases/latest) → Unzip → Double-click → Done
+[![macOS 12+](https://img.shields.io/badge/macOS-12%2B-blue.svg)](https://www.apple.com/macos/)
+[![Metal](https://img.shields.io/badge/renderer-Metal-orange.svg)](https://developer.apple.com/metal/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 </div>
 
----
+This repository builds two independently installable screen savers:
 
-## TL;DR
+- **Hyperspace Bloom** turns radial geometry into a continuously evolving mandala portal.
+- **Mandelbrot Saver** renders continuous Mandelbrot and Julia deep-zoom journeys. Its source and detailed documentation live in [Mandelbrot/](Mandelbrot/README.md).
 
-**The Problem**: macOS screensavers are boring. The built-in options are static images or basic animations. Third-party fractal viewers are either outdated, slow, or cost money.
+Both render locally with Metal and use no network access or source artwork.
 
-**The Solution**: A free, GPU-accelerated Mandelbrot/Julia set screensaver that renders beautiful deep zooms at up to 120fps on ProMotion displays using Apple's Metal framework.
+## Hyperspace Bloom visual engine
 
-### Why Use This?
+- **Recursive portal depth** — log-polar repetition creates the impression of moving through an infinite geometric temple.
+- **Four scene families** — Bloom, Temple, Weave, and Oracle are recombined from deterministic seeds.
+- **Living symmetry** — automatic scenes move among 6-, 7-, 8-, 10-, and 12-fold structures without mid-scene popping.
+- **Structured psychedelia** — layered petals, mirrored facets, luminous filigree, and pareidolic eye forms replace generic rainbow noise.
+- **Six cyclic palettes** — Cosmic Orchid, Electric Lotus, Solar Temple, Abyssal Cyan, Woven Vision, and Pearl Void.
+- **HDR output** — a 16-bit, extended-linear-sRGB pipeline uses available EDR headroom for luminous intersections without crushing the dark field.
+- **Adaptive performance** — GPU frame timing disables supersampling first, then preserves a sharper resolution floor and accepts 30 fps before further softening.
+- **Power awareness** — battery and Low Power Mode cap frame rate and render scale by default.
 
-| Feature | What It Does |
-|---------|--------------|
-| **ProMotion Metal Rendering** | Buttery smooth zooms at the display's native refresh rate (up to 120Hz), adaptive on battery |
-| **Deep-Color / EDR Output** | 16-bit float pipeline (no banding) with highlights that use XDR headroom where available |
-| **Curated Color Palettes** | Six distinct looks, cyclic gradients with dwell-and-dissolve auto-cycling |
-| **Julia Set Mode** | Curated Julia constants that gently morph while you dive |
-| **3D Lighting** | Optional Blinn-Phong shading with depth-stable relief normals |
-| **Living Camera** | Off-center approach pans, slow rotation, and freeze-dissolve transitions between dives |
-| **Zero Config** | Works beautifully out of the box, customize if you want |
+## Build and install
 
----
+Requirements:
 
-## Quick Example
-
-```
-1. Download MandelbrotSaver.saver.zip
-2. Unzip
-3. Double-click MandelbrotSaver.saver
-4. Click "Install"
-5. Open System Settings → Screen Saver → Select "Mandelbrot"
-```
-
-That's it. Your Mac now has a continuously zooming fractal screensaver.
-
----
-
-## How It Compares
-
-| Feature | Mandelbrot Saver | Electric Sheep | Fliqlo | Built-in macOS |
-|---------|------------------|----------------|--------|----------------|
-| GPU Accelerated | **Yes** (Metal) | No (CPU) | No | Partial |
-| Continuous Zoom | **Yes** (cycles through locations) | No | No | No |
-| Customizable | **Yes** (6 palettes, 4 shading modes) | Limited | No | Limited |
-| Julia Sets | **Yes** | No | No | No |
-| Free | **Yes** | Yes | Yes | Yes |
-| Works Offline | **Yes** | No (needs network) | Yes | Yes |
-| Multiple Palettes | **Yes** | No | No | Partial |
-
-**Best for**: Anyone who wants a beautiful, mesmerizing screensaver that showcases their Mac's GPU.
-
-**Not ideal for**: Users who prefer static images or clock-based screensavers.
-
----
-
-## Installation
-
-### From Release (Recommended)
-
-No Xcode or developer tools required.
-
-1. Download `MandelbrotSaver.saver.zip` from [Releases](https://github.com/ProofOfReach/MandelbrotSaver/releases/latest)
-2. Unzip the file
-3. Double-click `MandelbrotSaver.saver`
-4. Choose "Install for this user only" (or "Install for all users" if you have admin rights)
-5. Open **System Settings → Screen Saver** and select **Mandelbrot**
-
-### From Source
-
-Requires Xcode with Metal compiler.
+- Apple Silicon Mac
+- macOS 12 or newer
+- Xcode with the Metal toolchain
 
 ```bash
 git clone https://github.com/ProofOfReach/MandelbrotSaver.git
@@ -93,198 +44,80 @@ cd MandelbrotSaver
 ./build.sh --install
 ```
 
-Build options:
-```bash
-./build.sh           # Build only (creates MandelbrotSaver.saver/)
-./build.sh --install # Build and install to ~/Library/Screen Savers/
-./scripts/smoke-test.sh # Build and verify bundle, signing, architectures, and Metal library
-```
-
-`build.sh` builds an Apple Silicon (arm64) binary. If the Metal toolchain is missing, install it with:
+If the Metal compiler is missing:
 
 ```bash
 xcodebuild -downloadComponent MetalToolchain
 ```
 
----
+The build creates `HyperspaceBloom.saver`, `MandelbrotSaver.saver`, and `Hyperspace Bloom Settings.app`. Installation copies both savers to `~/Library/Screen Savers/` and the settings app to `~/Applications/`; select either saver in **System Settings → Screen Saver**.
 
-## Configuration
+## Options
 
-Click **Options** in System Settings → Screen Saver to customize:
+| Setting | Choices | Default |
+|---|---|---|
+| Motion | Dream → Voyage | Flow |
+| Palette | Six curated palettes | Cosmic Orchid |
+| Palette drift | On / Off | On |
+| Symmetry | Automatic, 6, 7, 8, 10, 12 | Automatic |
+| Complexity | Calm, Visionary, Maximum | Visionary |
+| Quality | Standard, Ultra | Ultra |
+| Battery saver | On / Off | On |
 
-| Setting | Options | Default |
-|---------|---------|---------|
-| **Zoom Speed** | Slow ← → Fast slider | Medium |
-| **Palette** | 6 curated color schemes | Ultra Fractal |
-| **Auto-cycle Palettes** | On/Off | On |
-| **Visual Quality** | Standard, Ultra | Ultra |
-| **Shading Mode** | Flat, 3D Blinn-Phong, Angle-based, Stripe | Flat |
-| **Julia Set Mode** | On/Off (renders curated Julia sets instead of Mandelbrot targets) | Off |
+Changing symmetry starts a soft dissolve into a newly seeded scene. Settings are saved immediately and apply the next time the saver opens.
 
-### Palettes
-
-- Ultra Fractal (classic blue-gold)
-- Ember (red-orange-yellow)
-- Abyss (deep blues and teals)
-- Neon (cyan-magenta-green)
-- Aurora (green-blue-purple)
-- Graphite (black-to-white)
-
-### Shading Modes
-
-| Mode | Description |
-|------|-------------|
-| **Flat** | Classic smooth coloring based on escape iterations |
-| **3D Blinn-Phong** | Simulated 3D surface with highlights and shadows |
-| **Angle-based** | Colors derived from escape angle for psychedelic effects |
-| **Stripe** | Orbital trap coloring with stripe patterns |
-
-### Visual Quality
-
-| Mode | Description |
-|------|-------------|
-| **Standard** | 1x rendering with conservative iteration caps |
-| **Ultra** | Retina-scale rendering, higher iteration caps, safer smoothing, and full 3D lighting |
-
----
+On macOS 26.0–26.5, Apple's legacy screen-saver host crashes before it can present third-party configuration sheets. Hyperspace Bloom hides that broken Options route on those releases; open **Hyperspace Bloom Settings** from `~/Applications` instead. On unaffected macOS releases, the standard Options button remains available.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    macOS ScreenSaver Framework                   │
-│                      (ScreenSaverView)                          │
-└─────────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      MandelbrotView.swift                        │
-│   - Animation state machine (zoom → freeze-dissolve → zoom)     │
-│   - Direct CAMetalLayer rendering                               │
-│   - Curated zoom target locations                               │
-└─────────────────────────────────────────────────────────────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        ▼                   ▼                   ▼
-┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-│ Mandelbrot.metal │ │ Preferences.swift│ │ ConfigureSheet   │
-│ - GPU compute    │ │ - User settings  │ │ - Options UI     │
-│ - 6 palettes     │ │ - Persistence    │ │ - No XIB needed  │
-│ - Julia mode     │ └──────────────────┘ └──────────────────┘
-│ - 4 shading modes│
-│ - Retina Ultra   │
-│ - perturbation   │
-└──────────────────┘
+```text
+macOS ScreenSaverView
+        │
+        ▼
+MandalaView.swift
+  • Direct HDR CAMetalLayer
+  • Scene timeline and texture dissolves
+  • Frame pacing, EDR, battery state
+  • GPU-time quality governor
+        │
+        ├── MandalaScene.swift
+        │     • Deterministic seeded scene generator
+        │
+        ├── Preferences.swift / ConfigureSheetController.swift
+        │     • Shared persistent settings and native controls
+        │
+        ▼
+Mandala.metal
+  • Kaleidoscopic coordinate folding
+  • Log-polar recursive chambers
+  • Petal, filigree, facet, and eye geometry
+  • Linear-light palettes, glow, and EDR tonemapping
 ```
 
-**Key Design Decisions:**
+The visuals use analytic 2.5D geometry rather than full raymarching. This retains the apparent tunnel depth while keeping native-resolution rendering practical on Apple Silicon.
 
-1. **Metal Compute Shaders** - Each pixel computed independently on GPU for maximum parallelism
-2. **Typed Shader Uniforms** - Swift and Metal share one compact parameter layout for render state
-3. **Ultra Visual Quality** - Defaults to Retina-scale rendering and higher iteration caps for modern Apple Silicon
-4. **Direct CAMetalLayer Rendering** - A 16-bit float (`rgba16Float`) extended-linear-sRGB Metal layer: band-free gradients, EDR highlights on XDR panels, and no screensaver subview compositing issues
-5. **Perturbation-Assisted Deep Zooms** - A CPU reference orbit with a GPU perturbation path (Zhuoran-style rebasing on Mandelbrot dives) once float32 precision runs out; the handoff point adapts to display resolution and target coordinates
-6. **Programmatic UI** - No XIB/NIB files, all configuration UI built in code
+## Verification
 
----
+Run the full build and GPU audit:
 
-## Troubleshooting
-
-### Screensaver doesn't appear in System Settings
-
-**Cause:** Installation didn't complete or macOS security blocked it.
-
-**Solution:**
 ```bash
-# Check if installed
-ls ~/Library/Screen\ Savers/
-
-# Reinstall
-./build.sh --install
+./scripts/smoke-test.sh
 ```
 
-Or manually copy `MandelbrotSaver.saver` to `~/Library/Screen Savers/`.
+The test verifies both products, including:
 
-### Preview shows black screen
+- Bundle identities, principal classes, signing, and arm64 architecture
+- Deterministic scene generation and parameter ranges
+- All four motifs and all six palettes through the compiled Metal library
+- Image contrast, highlights, color presence, and central-jewel separation
+- Deterministic pixel replay and the Ultra four-sample path
 
-**Cause:** GPU initialization can take a moment on first launch.
+Audit renders are written to `.codex-outputs/render-audit/`.
 
-**Solution:** Wait 2-3 seconds. If still black, try selecting a different screensaver and then re-selecting Mandelbrot.
+## Privacy
 
-### "Options" button is grayed out
-
-**Cause:** System Settings quirk when screensaver first installed.
-
-**Solution:** Close and reopen System Settings, or log out and back in.
-
-### Still having issues?
-
-1. Search [existing issues](https://github.com/ProofOfReach/MandelbrotSaver/issues)
-2. Open a [new issue](https://github.com/ProofOfReach/MandelbrotSaver/issues/new) with:
-   - macOS version
-   - Mac model (Intel or Apple Silicon)
-   - Screenshot of the problem
-
----
-
-## Limitations
-
-### What This Doesn't Do
-
-- **No manual navigation** - This is a screensaver, not an interactive explorer. It auto-zooms to curated beautiful locations.
-- **No arbitrary deep zoom** - Limited to ~10^5 zoom depth to maintain visual quality (deeper causes pixelation).
-- **No Buddhabrot/Burning Ship** - Only standard Mandelbrot and Julia sets.
-- **No Windows/Linux** - macOS only (uses Metal and ScreenSaver framework).
-
-### Known Issues
-
-| Issue | Workaround | Status |
-|-------|------------|--------|
-| First frame may stutter | Wait for GPU warmup | By design |
-| Hot corners conflict | Disable hot corners or adjust trigger delay | macOS behavior |
-
----
-
-## FAQ
-
-### Why "Mandelbrot"?
-
-Named after Benoit Mandelbrot, the mathematician who studied and popularized fractals. The Mandelbrot set is the most famous fractal, defined by the simple equation z = z² + c.
-
-### Is this safe to install?
-
-Yes. The code is open source and does exactly what it claims: render fractals. It doesn't access the network, read your files, or do anything except draw pretty pictures.
-
-### Will this drain my battery?
-
-Like any GPU-intensive task, it uses more power than a static screensaver. On laptops, macOS typically prevents the screensaver from running on battery unless you configure it otherwise.
-
-### Can I use a specific zoom location?
-
-Not currently. The screensaver cycles through curated locations compiled into the source. Adding custom locations requires modifying the source code.
-
-### Why curated zoom targets?
-
-Quality over quantity. Each location was hand-picked to look beautiful at all zoom levels without hitting precision limits. Adding arbitrary locations risks ugly artifacts.
-
-### Does it work on Intel Macs?
-
-No. Current releases target Apple Silicon (arm64) only. The last universal (Intel + Apple Silicon) build predates the ProMotion/power-adaptive rendering work.
-
----
-
-## Contributing
-
-Pull requests welcome! Areas of interest:
-
-- Additional palettes
-- New shading modes
-- Performance optimizations
-
----
+Neither screen saver uses the network, reads personal files, collects telemetry, or downloads imagery. They render procedural geometry and store only their screen saver preferences.
 
 ## License
 
-MIT License - Free to use, modify, and distribute.
-
-See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE).

@@ -1,42 +1,153 @@
 import ScreenSaver
 import Foundation
 
-/// Wrapper for ScreenSaverDefaults to manage Mandelbrot screensaver preferences
 final class Preferences {
-
-    // MARK: - Singleton
-
     static let shared = Preferences()
-    static let didChangeNotification = Notification.Name("MandelbrotPreferencesDidChange")
-    private static let moduleName = "MandelbrotSaver"
+    static let didChangeNotification = Notification.Name("HyperspaceBloomPreferencesDidChange")
 
-    // MARK: - Keys
+    // ScreenSaverDefaults requires the bundle identifier, not the executable
+    // or display name. Using the short module name creates a different domain
+    // in the settings app and the remote screen-saver host.
+    private static let moduleIdentifier = "com.proofofreach.HyperspaceBloom"
 
     private enum Keys {
-        static let zoomSpeed = "zoomSpeed"
+        static let motionSpeed = "motionSpeed"
         static let paletteIndex = "paletteIndex"
         static let autoCyclePalettes = "autoCyclePalettes"
-        static let shadingMode = "shadingMode"
-        static let juliaMode = "juliaMode"
+        static let symmetryIndex = "symmetryIndex"
+        static let intensity = "intensity"
         static let visualQuality = "visualQuality"
         static let batterySaver = "batterySaver"
     }
 
-    // MARK: - Defaults
-
     private enum Defaults {
-        static let zoomSpeed: Double = 0.985
-        static let paletteIndex: Int = 0
-        static let autoCyclePalettes: Bool = true
-        static let shadingMode: Int = 0
-        static let juliaMode: Bool = false
-        static let visualQuality: Int = 1
-        static let batterySaver: Bool = true
+        static let motionSpeed = 1.0
+        static let paletteIndex = 0
+        static let autoCyclePalettes = true
+        static let symmetryIndex = 0
+        static let intensity = 1
+        static let visualQuality = 1
+        static let batterySaver = true
     }
 
-    // MARK: - Properties
-
     private let defaults: ScreenSaverDefaults?
+
+    private init() {
+        defaults = ScreenSaverDefaults(forModuleWithName: Self.moduleIdentifier)
+        defaults?.register(defaults: [
+            Keys.motionSpeed: Defaults.motionSpeed,
+            Keys.paletteIndex: Defaults.paletteIndex,
+            Keys.autoCyclePalettes: Defaults.autoCyclePalettes,
+            Keys.symmetryIndex: Defaults.symmetryIndex,
+            Keys.intensity: Defaults.intensity,
+            Keys.visualQuality: Defaults.visualQuality,
+            Keys.batterySaver: Defaults.batterySaver,
+        ])
+    }
+
+    var motionSpeed: Double {
+        get {
+            let value = defaults?.double(forKey: Keys.motionSpeed) ?? Defaults.motionSpeed
+            return clamp(value, min: 0.4, max: 1.6)
+        }
+        set {
+            defaults?.set(clamp(newValue, min: 0.4, max: 1.6), forKey: Keys.motionSpeed)
+            persistAndNotify()
+        }
+    }
+
+    var paletteIndex: Int {
+        get {
+            return clamp(defaults?.integer(forKey: Keys.paletteIndex) ?? Defaults.paletteIndex,
+                         min: 0, max: Self.paletteNames.count - 1)
+        }
+        set {
+            defaults?.set(clamp(newValue, min: 0, max: Self.paletteNames.count - 1),
+                          forKey: Keys.paletteIndex)
+            persistAndNotify()
+        }
+    }
+
+    var autoCyclePalettes: Bool {
+        get { boolValue(forKey: Keys.autoCyclePalettes, default: Defaults.autoCyclePalettes) }
+        set {
+            defaults?.set(newValue, forKey: Keys.autoCyclePalettes)
+            persistAndNotify()
+        }
+    }
+
+    /// 0 = automatic; remaining indices map through `symmetryValues`.
+    var symmetryIndex: Int {
+        get {
+            return clamp(defaults?.integer(forKey: Keys.symmetryIndex) ?? Defaults.symmetryIndex,
+                         min: 0, max: Self.symmetryNames.count - 1)
+        }
+        set {
+            defaults?.set(clamp(newValue, min: 0, max: Self.symmetryNames.count - 1),
+                          forKey: Keys.symmetryIndex)
+            persistAndNotify()
+        }
+    }
+
+    var forcedSymmetry: Int? {
+        let index = symmetryIndex
+        guard index > 0 else { return nil }
+        return Self.symmetryValues[index]
+    }
+
+    /// 0 = calm, 1 = visionary, 2 = maximum.
+    var intensity: Int {
+        get {
+            return clamp(defaults?.integer(forKey: Keys.intensity) ?? Defaults.intensity,
+                         min: 0, max: Self.intensityNames.count - 1)
+        }
+        set {
+            defaults?.set(clamp(newValue, min: 0, max: Self.intensityNames.count - 1),
+                          forKey: Keys.intensity)
+            persistAndNotify()
+        }
+    }
+
+    var intensityValue: Float {
+        return [0.62, 0.92, 1.18][intensity]
+    }
+
+    /// 0 = standard, 1 = ultra.
+    var visualQuality: Int {
+        get {
+            return clamp(defaults?.integer(forKey: Keys.visualQuality) ?? Defaults.visualQuality,
+                         min: 0, max: Self.visualQualityNames.count - 1)
+        }
+        set {
+            defaults?.set(clamp(newValue, min: 0, max: Self.visualQualityNames.count - 1),
+                          forKey: Keys.visualQuality)
+            persistAndNotify()
+        }
+    }
+
+    var batterySaver: Bool {
+        get { boolValue(forKey: Keys.batterySaver, default: Defaults.batterySaver) }
+        set {
+            defaults?.set(newValue, forKey: Keys.batterySaver)
+            persistAndNotify()
+        }
+    }
+
+    func resetToDefaults() {
+        defaults?.set(Defaults.motionSpeed, forKey: Keys.motionSpeed)
+        defaults?.set(Defaults.paletteIndex, forKey: Keys.paletteIndex)
+        defaults?.set(Defaults.autoCyclePalettes, forKey: Keys.autoCyclePalettes)
+        defaults?.set(Defaults.symmetryIndex, forKey: Keys.symmetryIndex)
+        defaults?.set(Defaults.intensity, forKey: Keys.intensity)
+        defaults?.set(Defaults.visualQuality, forKey: Keys.visualQuality)
+        defaults?.set(Defaults.batterySaver, forKey: Keys.batterySaver)
+        persistAndNotify()
+    }
+
+    private func boolValue(forKey key: String, default defaultValue: Bool) -> Bool {
+        guard defaults?.object(forKey: key) != nil else { return defaultValue }
+        return defaults?.bool(forKey: key) ?? defaultValue
+    }
 
     private func clamp<T: Comparable>(_ value: T, min minValue: T, max maxValue: T) -> T {
         return max(minValue, min(maxValue, value))
@@ -44,163 +155,20 @@ final class Preferences {
 
     private func persistAndNotify() {
         defaults?.synchronize()
-        notifyChanged()
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
-    private func notifyChanged() {
-        NotificationCenter.default.post(name: Preferences.didChangeNotification, object: self)
-    }
-
-    /// Zoom speed multiplier at 60fps (lower = faster, higher = slower)
-    /// Range: 0.965 to 0.9975
-    var zoomSpeed: Double {
-        get {
-            let value = defaults?.double(forKey: Keys.zoomSpeed) ?? 0
-            let speed = value > 0 ? value : Defaults.zoomSpeed
-            return clamp(speed, min: 0.965, max: 0.9975)
-        }
-        set {
-            let clamped = clamp(newValue, min: 0.965, max: 0.9975)
-            defaults?.set(clamped, forKey: Keys.zoomSpeed)
-            persistAndNotify()
-        }
-    }
-
-    /// Current palette index
-    var paletteIndex: Int {
-        get {
-            let value = defaults?.integer(forKey: Keys.paletteIndex) ?? Defaults.paletteIndex
-            return clamp(value, min: 0, max: Preferences.paletteNames.count - 1)
-        }
-        set {
-            let clamped = clamp(newValue, min: 0, max: Preferences.paletteNames.count - 1)
-            defaults?.set(clamped, forKey: Keys.paletteIndex)
-            persistAndNotify()
-        }
-    }
-
-    /// Whether to automatically cycle through palettes
-    var autoCyclePalettes: Bool {
-        get {
-            // Check if the key exists, otherwise return default
-            if defaults?.object(forKey: Keys.autoCyclePalettes) == nil {
-                return Defaults.autoCyclePalettes
-            }
-            return defaults?.bool(forKey: Keys.autoCyclePalettes) ?? Defaults.autoCyclePalettes
-        }
-        set {
-            defaults?.set(newValue, forKey: Keys.autoCyclePalettes)
-            persistAndNotify()
-        }
-    }
-
-    /// Shading mode: 0 = flat, 1 = 3D Blinn-Phong, 2 = angle-based, 3 = stripe
-    var shadingMode: Int {
-        get {
-            let value = defaults?.integer(forKey: Keys.shadingMode) ?? Defaults.shadingMode
-            return clamp(value, min: 0, max: Preferences.shadingModeNames.count - 1)
-        }
-        set {
-            let clamped = clamp(newValue, min: 0, max: Preferences.shadingModeNames.count - 1)
-            defaults?.set(clamped, forKey: Keys.shadingMode)
-            persistAndNotify()
-        }
-    }
-
-    /// Whether to render Julia sets instead of Mandelbrot
-    var juliaMode: Bool {
-        get {
-            if defaults?.object(forKey: Keys.juliaMode) == nil {
-                return Defaults.juliaMode
-            }
-            return defaults?.bool(forKey: Keys.juliaMode) ?? Defaults.juliaMode
-        }
-        set {
-            defaults?.set(newValue, forKey: Keys.juliaMode)
-            persistAndNotify()
-        }
-    }
-
-    /// Visual quality: 0 = Standard, 1 = Ultra
-    var visualQuality: Int {
-        get {
-            if defaults?.object(forKey: Keys.visualQuality) == nil {
-                return Defaults.visualQuality
-            }
-            let value = defaults?.integer(forKey: Keys.visualQuality) ?? Defaults.visualQuality
-            return clamp(value, min: 0, max: Preferences.visualQualityNames.count - 1)
-        }
-        set {
-            let clamped = clamp(newValue, min: 0, max: Preferences.visualQualityNames.count - 1)
-            defaults?.set(clamped, forKey: Keys.visualQuality)
-            persistAndNotify()
-        }
-    }
-
-    /// Cap refresh rate and quality when on battery or in Low Power Mode
-    var batterySaver: Bool {
-        get {
-            if defaults?.object(forKey: Keys.batterySaver) == nil {
-                return Defaults.batterySaver
-            }
-            return defaults?.bool(forKey: Keys.batterySaver) ?? Defaults.batterySaver
-        }
-        set {
-            defaults?.set(newValue, forKey: Keys.batterySaver)
-            persistAndNotify()
-        }
-    }
-
-    // MARK: - Initialization
-
-    private init() {
-        defaults = ScreenSaverDefaults(forModuleWithName: Preferences.moduleName)
-
-        // Register defaults
-        defaults?.register(defaults: [
-            Keys.zoomSpeed: Defaults.zoomSpeed,
-            Keys.paletteIndex: Defaults.paletteIndex,
-            Keys.autoCyclePalettes: Defaults.autoCyclePalettes,
-            Keys.shadingMode: Defaults.shadingMode,
-            Keys.juliaMode: Defaults.juliaMode,
-            Keys.visualQuality: Defaults.visualQuality,
-            Keys.batterySaver: Defaults.batterySaver
-        ])
-    }
-
-    // MARK: - Helpers
-
-    /// Reset all preferences to defaults
-    func resetToDefaults() {
-        zoomSpeed = Defaults.zoomSpeed
-        paletteIndex = Defaults.paletteIndex
-        autoCyclePalettes = Defaults.autoCyclePalettes
-        shadingMode = Defaults.shadingMode
-        juliaMode = Defaults.juliaMode
-        visualQuality = Defaults.visualQuality
-        batterySaver = Defaults.batterySaver
-    }
-
-    /// Palette names for UI display
     static let paletteNames = [
-        "Ultra Fractal",
-        "Ember",
-        "Abyss",
-        "Neon",
-        "Aurora",
-        "Graphite"
+        "Cosmic Orchid",
+        "Electric Lotus",
+        "Solar Temple",
+        "Abyssal Cyan",
+        "Woven Vision",
+        "Pearl Void",
     ]
 
-    /// Shading mode names for UI display
-    static let shadingModeNames = [
-        "Flat",
-        "3D Blinn-Phong",
-        "Angle-based",
-        "Stripe"
-    ]
-
-    static let visualQualityNames = [
-        "Standard",
-        "Ultra"
-    ]
+    static let symmetryNames = ["Automatic", "6-fold", "7-fold", "8-fold", "10-fold", "12-fold"]
+    static let symmetryValues = [0, 6, 7, 8, 10, 12]
+    static let intensityNames = ["Calm", "Visionary", "Maximum"]
+    static let visualQualityNames = ["Standard", "Ultra"]
 }

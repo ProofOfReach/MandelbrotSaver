@@ -5,24 +5,24 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>HyperspaceBloom</string>
+    <string>HyperspaceBloomSettings</string>
     <key>CFBundleIdentifier</key>
-    <string>com.proofofreach.HyperspaceBloom</string>
+    <string>com.proofofreach.HyperspaceBloom.Settings</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Hyperspace Bloom</string>
+    <string>Hyperspace Bloom Settings</string>
     <key>CFBundlePackageType</key>
-    <string>BNDL</string>
+    <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>1.8.0</string>
     <key>CFBundleVersion</key>
     <string>9</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026. All rights reserved.</string>
-    <key>NSPrincipalClass</key>
-    <string>MandalaView</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
 </dict>
 </plist>
