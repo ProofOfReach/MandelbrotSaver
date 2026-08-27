@@ -50,7 +50,7 @@ If the Metal compiler is missing:
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-The build creates `HyperspaceBloom.saver`, `MandelbrotSaver.saver`, and `Hyperspace Bloom Settings.app`. Installation copies both savers to `~/Library/Screen Savers/` and the settings app to `~/Applications/`; select either saver in **System Settings → Screen Saver**.
+The build creates `HyperspaceBloom.saver`, `MandelbrotSaver.saver`, `Hyperspace Bloom Settings.app`, and `Mandelbrot Settings.app`. Installation copies both savers to `~/Library/Screen Savers/` and both settings apps to `~/Applications/`; select either saver in **System Settings → Screen Saver**.
 
 ## Options
 
@@ -66,7 +66,7 @@ The build creates `HyperspaceBloom.saver`, `MandelbrotSaver.saver`, and `Hypersp
 
 Changing symmetry starts a soft dissolve into a newly seeded scene. Settings are saved immediately and apply the next time the saver opens.
 
-On macOS 26.0–26.5, Apple's legacy screen-saver host crashes before it can present third-party configuration sheets. Hyperspace Bloom hides that broken Options route on those releases; open **Hyperspace Bloom Settings** from `~/Applications` instead. On unaffected macOS releases, the standard Options button remains available.
+On macOS 26.0–26.5, Apple's legacy screen-saver host crashes before it can present third-party configuration sheets. Hyperspace Bloom and Mandelbrot hide that broken Options route on those releases; open **Hyperspace Bloom Settings** or **Mandelbrot Settings** from `~/Applications` instead. On unaffected macOS releases, the standard Options button remains available.
 
 ## Architecture
 

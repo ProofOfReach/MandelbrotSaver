@@ -304,7 +304,8 @@ FractalResult evaluateFractal(
         uint validLength = uint(max(uniforms.extra.x, 1.0f));
         uint m = 0;
         for (int i = 0; i < int(maxIterations); i++) {
-            float4 ref = referenceOrbit[m];
+            uint referenceIndex = min(m, validLength - 1);
+            float4 ref = referenceOrbit[referenceIndex];
             float2 Z = ref.xy;
 
             float2 z = Z + dz;

@@ -3,7 +3,7 @@ import ScreenSaver
 
 /// Controller for the screensaver configuration sheet
 /// Uses programmatic UI (no XIB) with NSStackView layout
-final class ConfigureSheetController: NSObject {
+final class ConfigureSheetController: NSObject, NSWindowDelegate {
 
     // MARK: - Properties
 
@@ -24,6 +24,12 @@ final class ConfigureSheetController: NSObject {
     // MARK: - Window Creation
 
     func configureSheet() -> NSWindow {
+        if let window {
+            loadPreferences()
+            startPreview()
+            return window
+        }
+
         let sheet = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
             styleMask: [.titled],
@@ -32,6 +38,7 @@ final class ConfigureSheetController: NSObject {
         )
         sheet.title = "Mandelbrot Screensaver Options"
         sheet.isReleasedWhenClosed = false
+        sheet.delegate = self
 
         let contentView = createContentView()
         sheet.contentView = contentView
@@ -356,15 +363,16 @@ final class ConfigureSheetController: NSObject {
     }
 
     @objc private func closeSheet(_ sender: NSButton) {
+        guard let window else { return }
+        if let sheetParent = window.sheetParent {
+            sheetParent.endSheet(window)
+        }
+        window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
         stopPreview()
         previewView = nil
-        guard let window = window,
-              let sheetParent = window.sheetParent else {
-            window?.close()
-            self.window = nil
-            return
-        }
-        sheetParent.endSheet(window)
-        self.window = nil
+        window = nil
     }
 }

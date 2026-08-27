@@ -204,8 +204,15 @@ guard let view = viewClass.init(frame: NSRect(x: 0, y: 0, width: 640, height: 48
     fatalError("unable to instantiate screensaver view")
 }
 
-guard view.hasConfigureSheet else {
-    fatalError("hasConfigureSheet is false")
+let os = ProcessInfo.processInfo.operatingSystemVersion
+if os.majorVersion == 26 && os.minorVersion <= 5 {
+    guard !view.hasConfigureSheet else {
+        fatalError("broken macOS 26.5 system options path should be hidden")
+    }
+} else {
+    guard view.hasConfigureSheet else {
+        fatalError("hasConfigureSheet is false")
+    }
 }
 
 guard let sheet = view.configureSheet else {

@@ -95,8 +95,8 @@ cd MandelbrotSaver
 
 Build options:
 ```bash
-./build.sh           # Build only (creates MandelbrotSaver.saver/)
-./build.sh --install # Build and install to ~/Library/Screen Savers/
+./build.sh           # Build only (creates MandelbrotSaver.saver and Mandelbrot Settings.app)
+./build.sh --install # Build and install to ~/Library/Screen Savers/ and ~/Applications/
 ./scripts/smoke-test.sh # Build and verify bundle, signing, architectures, and Metal library
 ```
 
@@ -111,6 +111,8 @@ xcodebuild -downloadComponent MetalToolchain
 ## Configuration
 
 Click **Options** in System Settings → Screen Saver to customize:
+
+On macOS 26.0–26.5, Apple's legacy screen-saver host crashes before it can present third-party configuration sheets. Mandelbrot hides the broken **Options** route on those releases; open **Mandelbrot Settings** from `~/Applications` instead. On unaffected macOS releases, the standard **Options** button remains available.
 
 | Setting | Options | Default |
 |---------|---------|---------|

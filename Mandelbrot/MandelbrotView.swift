@@ -51,11 +51,6 @@ class MandelbrotView: ScreenSaverView {
     // Direct display path
     private var metalLayer: CAMetalLayer?
 
-    // CPU fallback path (for preview edge-cases / when no drawable is available)
-    private var fallbackTexture: MTLTexture?
-    private var lastTextureSize: CGSize = .zero
-    private var readbackPixels: [UInt8] = []
-    private var latestFallbackImage: CGImage?
 
     // MARK: - Configuration Sheet
     private lazy var configureSheetController = ConfigureSheetController()
@@ -283,13 +278,11 @@ class MandelbrotView: ScreenSaverView {
         guard constrained != powerConstrained else { return }
         powerConstrained = constrained
         updateAnimationPacing()
-        lastTextureSize = .zero
         updateMetalLayerGeometry()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        lastTextureSize = .zero
         updateMetalLayerGeometry()
     }
 
@@ -359,7 +352,6 @@ class MandelbrotView: ScreenSaverView {
         let previousQuality = visualQuality
         loadPreferences()
         if previousQuality != visualQuality {
-            lastTextureSize = .zero
             updateMetalLayerGeometry()
         }
     }
@@ -452,32 +444,6 @@ class MandelbrotView: ScreenSaverView {
         return base * Self.governorLevels[governorIndex].scaleFactor
     }
 
-    private func createFallbackTextureIfNeeded() {
-        let size = currentRenderSize()
-        guard size.width > 0, size.height > 0 else { return }
-
-        if size == lastTextureSize, fallbackTexture != nil { return }
-        lastTextureSize = size
-
-        guard let device = metalDevice else { return }
-
-        let width = max(1, Int(size.width))
-        let height = max(1, Int(size.height))
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            // Match the direct CAMetalLayer path. The shader outputs linear
-            // light and relies on an sRGB target to encode display values.
-            pixelFormat: .bgra8Unorm_srgb,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderWrite, .shaderRead]
-        descriptor.storageMode = .shared
-
-        fallbackTexture = device.makeTexture(descriptor: descriptor)
-        readbackPixels = [UInt8](repeating: 0, count: width * height * 4)
-    }
 
     // MARK: - Auto-Pilot
 
@@ -749,14 +715,13 @@ class MandelbrotView: ScreenSaverView {
         governorLastChange = now
         // Old-level samples no longer describe the new cost; re-measure.
         gpuTimeEMA = 0
-        lastTextureSize = .zero
         updateMetalLayerGeometry()
     }
 
     // MARK: - Perturbation Theory Helper
 
-    private func updateReferenceOrbit(maxIterations: Int) {
-        guard let device = metalDevice else { return }
+    private func updateReferenceOrbit(maxIterations: Int) -> Bool {
+        guard let device = metalDevice else { return false }
 
         // The reference orbit depends only on the anchor point (center / Julia c)
         // and length. The auto-pilot pins the center to the target for the whole
@@ -769,7 +734,7 @@ class MandelbrotView: ScreenSaverView {
            cached.juliaCx == juliaCx, cached.juliaCy == juliaCy,
            cached.length >= maxIterations,
            referenceOrbitBuffer != nil {
-            return
+            return true
         }
 
         let bufferLength = maxIterations * MemoryLayout<SIMD4<Float>>.size
@@ -779,7 +744,7 @@ class MandelbrotView: ScreenSaverView {
             slot = device.makeBuffer(length: bufferLength, options: .storageModeShared)
             referenceOrbitBuffers[nextIndex] = slot
         }
-        guard let buffer = slot else { return }
+        guard let buffer = slot else { return false }
         referenceOrbitRingIndex = nextIndex
         referenceOrbitBuffer = buffer
         let pointer = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: maxIterations)
@@ -856,24 +821,17 @@ class MandelbrotView: ScreenSaverView {
             julia: juliaMode, juliaCx: juliaCx, juliaCy: juliaCy,
             length: maxIterations
         )
+        return true
     }
 
     private struct RenderTarget {
         let texture: MTLTexture
-        let drawable: CAMetalDrawable?
-        let size: CGSize
+        let drawable: CAMetalDrawable
     }
 
     private func acquireRenderTarget() -> RenderTarget? {
-        if let layer = metalLayer, let drawable = layer.nextDrawable() {
-            let size = CGSize(width: drawable.texture.width, height: drawable.texture.height)
-            return RenderTarget(texture: drawable.texture, drawable: drawable, size: size)
-        }
-
-        createFallbackTextureIfNeeded()
-        guard let texture = fallbackTexture else { return nil }
-        let size = CGSize(width: texture.width, height: texture.height)
-        return RenderTarget(texture: texture, drawable: nil, size: size)
+        guard let metalLayer, let drawable = metalLayer.nextDrawable() else { return nil }
+        return RenderTarget(texture: drawable.texture, drawable: drawable)
     }
 
     private func makeUniforms(width: Int, height: Int, maxIterations: Int, policy: RenderPolicy, heldWeight: Float) -> ShaderUniforms {
@@ -892,6 +850,7 @@ class MandelbrotView: ScreenSaverView {
         let pipeline: MTLComputePipelineState
         let maxIterations: Int
         let policy: RenderPolicy
+        let usesReferenceOrbit: Bool
     }
 
     /// Picks the precision path and iteration budget for the current state,
@@ -928,11 +887,12 @@ class MandelbrotView: ScreenSaverView {
 
         let pipeline: MTLComputePipelineState?
         let maxIterations: Int
-        if usePerturbation {
+        let usesReferenceOrbit: Bool
+        if usePerturbation && updateReferenceOrbit(maxIterations: policy.maxPerturbationIterations) {
             // Compute at the full cap so the cached orbit stays valid for the
             // entire zoom into this target.
-            updateReferenceOrbit(maxIterations: policy.maxPerturbationIterations)
             pipeline = computePipelinePerturbation
+            usesReferenceOrbit = true
             // Continue the float ramp from the handoff, doubling the budget
             // per decade of further depth: full cap by end-of-dive scales
             // (curated views need median escape counts of 300-1400) with no
@@ -951,10 +911,16 @@ class MandelbrotView: ScreenSaverView {
             maxIterations = budget
         } else {
             pipeline = computePipelineFloat
+            usesReferenceOrbit = false
             maxIterations = floatBudget(at: currentScale)
         }
         guard let pipeline else { return nil }
-        return FramePlan(pipeline: pipeline, maxIterations: maxIterations, policy: policy)
+        return FramePlan(
+            pipeline: pipeline,
+            maxIterations: maxIterations,
+            policy: policy,
+            usesReferenceOrbit: usesReferenceOrbit
+        )
     }
 
     private func ensureDummyHeldTexture() -> MTLTexture? {
@@ -997,12 +963,12 @@ class MandelbrotView: ScreenSaverView {
     ) -> Bool {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
 
-        if referenceOrbitBuffer == nil {
-            referenceOrbitBuffer = metalDevice?.makeBuffer(length: 16, options: .storageModeShared)
-        }
-        guard let refBuffer = referenceOrbitBuffer else {
-            encoder.endEncoding()
-            return false
+        if plan.usesReferenceOrbit {
+            guard let refBuffer = referenceOrbitBuffer else {
+                encoder.endEncoding()
+                return false
+            }
+            encoder.setBuffer(refBuffer, offset: 0, index: 1)
         }
 
         var uniforms = makeUniforms(
@@ -1017,7 +983,6 @@ class MandelbrotView: ScreenSaverView {
         encoder.setTexture(texture, index: 0)
         encoder.setTexture(held, index: 1)
         encoder.setBytes(&uniforms, length: MemoryLayout<ShaderUniforms>.size, index: 0)
-        encoder.setBuffer(refBuffer, offset: 0, index: 1)
 
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         let threadGroups = MTLSize(
@@ -1033,7 +998,7 @@ class MandelbrotView: ScreenSaverView {
 
     /// Renders the outgoing dive's frame into heldTexture so the next dive
     /// can dissolve in over it. Returns false when no direct-layer target is
-    /// available (the fallback path cuts hard instead).
+    /// available.
     private func captureOutgoingFrame() -> Bool {
         guard let layer = metalLayer, let commandQueue else { return false }
         let size = layer.drawableSize
@@ -1044,13 +1009,17 @@ class MandelbrotView: ScreenSaverView {
               encodeFractal(into: held, held: dummy, heldWeight: 0.0, plan: plan, commandBuffer: commandBuffer)
         else { return false }
         commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
         return true
     }
 
-    // Returns true if NSView draw() should be triggered for CPU fallback presentation.
     @discardableResult
     private func renderFrame() -> Bool {
         guard let commandQueue else { return false }
+
+        // A missing drawable means this frame cannot be presented, including
+        // a pending transition. Leave its state intact for the next frame.
+        guard let target = acquireRenderTarget() else { return false }
 
         // Dive boundary: freeze the outgoing frame, move to the next target,
         // and dissolve into it. Hard cut when capture isn't possible.
@@ -1061,8 +1030,7 @@ class MandelbrotView: ScreenSaverView {
             crossfadeProgress = captured ? 0.0 : 1.0
         }
 
-        guard let target = acquireRenderTarget(),
-              let plan = planFrame(textureHeight: target.texture.height),
+        guard let plan = planFrame(textureHeight: target.texture.height),
               let dummy = ensureDummyHeldTexture(),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             return false
@@ -1070,7 +1038,7 @@ class MandelbrotView: ScreenSaverView {
 
         var held: MTLTexture = dummy
         var heldWeight: Float = 0.0
-        if crossfadeProgress < 1.0, target.drawable != nil,
+        if crossfadeProgress < 1.0,
            let heldFrame = heldTexture,
            heldFrame.width == target.texture.width,
            heldFrame.height == target.texture.height {
@@ -1084,97 +1052,37 @@ class MandelbrotView: ScreenSaverView {
             plan: plan, commandBuffer: commandBuffer)
         else { return false }
 
-        if let drawable = target.drawable {
-            commandBuffer.present(drawable)
-            // Feed the performance governor. The handler runs on Metal's
-            // completion queue; the animation thread consumes the sample on
-            // its next tick.
-            commandBuffer.addCompletedHandler { [weak self] cb in
-                guard let self else { return }
-                let gpuTime = cb.gpuEndTime - cb.gpuStartTime
-                guard gpuTime > 0 else { return }
-                self.gpuTimeLock.lock()
-                self.latestGPUFrameTime = gpuTime
-                self.gpuTimeLock.unlock()
-            }
-            commandBuffer.commit()
-            return false
+        commandBuffer.present(target.drawable)
+        // Feed the performance governor. The handler runs on Metal's
+        // completion queue; the animation thread consumes the sample on
+        // its next tick.
+        commandBuffer.addCompletedHandler { [weak self] cb in
+            guard let self else { return }
+            let gpuTime = cb.gpuEndTime - cb.gpuStartTime
+            guard gpuTime > 0 else { return }
+            self.gpuTimeLock.lock()
+            self.latestGPUFrameTime = gpuTime
+            self.gpuTimeLock.unlock()
         }
-
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        updateFallbackImage(from: target.texture)
-        return true
+        return false
     }
 
-    private func updateFallbackImage(from texture: MTLTexture) {
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-
-        if readbackPixels.count != width * height * 4 {
-            readbackPixels = [UInt8](repeating: 0, count: width * height * 4)
-        }
-
-        texture.getBytes(
-            &readbackPixels,
-            bytesPerRow: bytesPerRow,
-            from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                            size: MTLSize(width: width, height: height, depth: 1)),
-            mipmapLevel: 0
-        )
-
-        guard let dataProvider = CGDataProvider(data: Data(readbackPixels) as CFData) else {
-            latestFallbackImage = nil
-            return
-        }
-
-        let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(.init(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
-
-        latestFallbackImage = CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: bitmapInfo,
-            provider: dataProvider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )
-    }
-
-    // MARK: - Drawing / Animation
-
-    override func draw(_ rect: NSRect) {
-        NSColor.black.setFill()
-        rect.fill()
-
-        guard let context = NSGraphicsContext.current?.cgContext,
-              let image = latestFallbackImage else { return }
-
-        context.saveGState()
-        context.translateBy(x: 0, y: bounds.height)
-        context.scaleBy(x: 1, y: -1)
-        context.draw(image, in: bounds)
-        context.restoreGState()
-    }
 
     override func animateOneFrame() {
         updateAnimation()
-
-        let needsCPUDisplay = renderFrame()
-        if needsCPUDisplay {
-            setNeedsDisplay(bounds)
-        }
+        renderFrame()
     }
 
     // MARK: - Configuration Sheet
 
     override var hasConfigureSheet: Bool {
-        true
+        // macOS 26.5's legacyScreenSaver extension crashes inside Apple's
+        // presentConfiguration path before loading third-party bundle code.
+        // Hide the broken system button on affected releases; build.sh also
+        // installs a standalone settings app using the same controller.
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return !(version.majorVersion == 26 && version.minorVersion <= 5)
     }
 
     override var configureSheet: NSWindow? {

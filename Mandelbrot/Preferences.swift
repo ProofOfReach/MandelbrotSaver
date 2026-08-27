@@ -8,7 +8,7 @@ final class Preferences {
 
     static let shared = Preferences()
     static let didChangeNotification = Notification.Name("MandelbrotPreferencesDidChange")
-    private static let moduleName = "MandelbrotSaver"
+    private static let moduleName = "com.proofofreach.MandelbrotSaver"
 
     // MARK: - Keys
 
@@ -172,13 +172,14 @@ final class Preferences {
 
     /// Reset all preferences to defaults
     func resetToDefaults() {
-        zoomSpeed = Defaults.zoomSpeed
-        paletteIndex = Defaults.paletteIndex
-        autoCyclePalettes = Defaults.autoCyclePalettes
-        shadingMode = Defaults.shadingMode
-        juliaMode = Defaults.juliaMode
-        visualQuality = Defaults.visualQuality
-        batterySaver = Defaults.batterySaver
+        defaults?.set(Defaults.zoomSpeed, forKey: Keys.zoomSpeed)
+        defaults?.set(Defaults.paletteIndex, forKey: Keys.paletteIndex)
+        defaults?.set(Defaults.autoCyclePalettes, forKey: Keys.autoCyclePalettes)
+        defaults?.set(Defaults.shadingMode, forKey: Keys.shadingMode)
+        defaults?.set(Defaults.juliaMode, forKey: Keys.juliaMode)
+        defaults?.set(Defaults.visualQuality, forKey: Keys.visualQuality)
+        defaults?.set(Defaults.batterySaver, forKey: Keys.batterySaver)
+        persistAndNotify()
     }
 
     /// Palette names for UI display

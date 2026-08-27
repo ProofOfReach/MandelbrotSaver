@@ -21,19 +21,14 @@ final class MandalaView: ScreenSaverView {
         var quality: SIMD4<Float>  // sampleCount, heldWeight, breathRate, exposure
     }
 
-    // MARK: - Presentation and fallback
-
-    private var fallbackTexture: MTLTexture?
-    private var fallbackTextureSize: CGSize = .zero
-    private var readbackPixels: [UInt8] = []
-    private var latestFallbackImage: CGImage?
+    // MARK: - Presentation
 
     private var heldTexture: MTLTexture?
     private var dummyHeldTexture: MTLTexture?
 
     private struct RenderTarget {
         let texture: MTLTexture
-        let drawable: CAMetalDrawable?
+        let drawable: CAMetalDrawable
     }
 
     // MARK: - Scene state
@@ -142,7 +137,6 @@ final class MandalaView: ScreenSaverView {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        fallbackTextureSize = .zero
         updateMetalLayerGeometry()
     }
 
@@ -193,7 +187,6 @@ final class MandalaView: ScreenSaverView {
             sceneRefreshRequested = true
         }
         if previousQuality != visualQuality {
-            fallbackTextureSize = .zero
             updateMetalLayerGeometry()
         }
     }
@@ -337,7 +330,6 @@ final class MandalaView: ScreenSaverView {
         guard constrained != powerConstrained else { return }
         powerConstrained = constrained
         governorIndex = constrained ? max(governorIndex, 1) : governorIndex
-        fallbackTextureSize = .zero
         updateAnimationPacing()
         updateMetalLayerGeometry()
     }
@@ -440,7 +432,6 @@ final class MandalaView: ScreenSaverView {
         governorIndex = nextIndex
         governorLastChange = now
         gpuTimeEMA = 0.0
-        fallbackTextureSize = .zero
         updateMetalLayerGeometry()
         updateAnimationPacing()
     }
@@ -489,34 +480,10 @@ final class MandalaView: ScreenSaverView {
         return heldTexture
     }
 
-    private func createFallbackTextureIfNeeded() {
-        let size = currentRenderSize()
-        guard size.width > 0.0, size.height > 0.0 else { return }
-        if size == fallbackTextureSize, fallbackTexture != nil { return }
-        fallbackTextureSize = size
-
-        guard let device = metalDevice else { return }
-        let width = max(1, Int(size.width))
-        let height = max(1, Int(size.height))
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead, .shaderWrite]
-        descriptor.storageMode = .shared
-        fallbackTexture = device.makeTexture(descriptor: descriptor)
-        readbackPixels = [UInt8](repeating: 0, count: width * height * 4)
-    }
 
     private func acquireRenderTarget() -> RenderTarget? {
-        if let metalLayer, let drawable = metalLayer.nextDrawable() {
-            return RenderTarget(texture: drawable.texture, drawable: drawable)
-        }
-        createFallbackTextureIfNeeded()
-        guard let fallbackTexture else { return nil }
-        return RenderTarget(texture: fallbackTexture, drawable: nil)
+        guard let metalLayer, let drawable = metalLayer.nextDrawable() else { return nil }
+        return RenderTarget(texture: drawable.texture, drawable: drawable)
     }
 
     // MARK: - Encoding
@@ -592,12 +559,17 @@ final class MandalaView: ScreenSaverView {
               ) else { return false }
 
         commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
         return true
     }
 
     @discardableResult
     private func renderFrame() -> Bool {
         guard let commandQueue else { return false }
+
+        // A missing drawable means this frame cannot be presented, including
+        // a pending transition. Leave its state intact for the next frame.
+        guard let target = acquireRenderTarget() else { return false }
 
         if transitionState == .capturePending {
             let captured = captureOutgoingFrame()
@@ -606,14 +578,12 @@ final class MandalaView: ScreenSaverView {
             crossfadeProgress = captured ? 0.0 : 1.0
         }
 
-        guard let target = acquireRenderTarget(),
-              let dummy = ensureDummyHeldTexture(),
+        guard let dummy = ensureDummyHeldTexture(),
               let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
 
         var held = dummy
         var heldWeight: Float = 0.0
         if crossfadeProgress < 1.0,
-           target.drawable != nil,
            let heldTexture,
            heldTexture.width == target.texture.width,
            heldTexture.height == target.texture.height {
@@ -629,85 +599,22 @@ final class MandalaView: ScreenSaverView {
             commandBuffer: commandBuffer
         ) else { return false }
 
-        if let drawable = target.drawable {
-            commandBuffer.present(drawable)
-            commandBuffer.addCompletedHandler { [weak self] completedBuffer in
-                guard let self else { return }
-                let gpuTime = completedBuffer.gpuEndTime - completedBuffer.gpuStartTime
-                guard gpuTime > 0.0 else { return }
-                self.gpuTimeLock.lock()
-                self.latestGPUFrameTime = gpuTime
-                self.gpuTimeLock.unlock()
-            }
-            commandBuffer.commit()
-            return false
+        commandBuffer.present(target.drawable)
+        commandBuffer.addCompletedHandler { [weak self] completedBuffer in
+            guard let self else { return }
+            let gpuTime = completedBuffer.gpuEndTime - completedBuffer.gpuStartTime
+            guard gpuTime > 0.0 else { return }
+            self.gpuTimeLock.lock()
+            self.latestGPUFrameTime = gpuTime
+            self.gpuTimeLock.unlock()
         }
-
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        updateFallbackImage(from: target.texture)
-        return true
-    }
-
-    // MARK: - Fallback drawing
-
-    private func updateFallbackImage(from texture: MTLTexture) {
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-        if readbackPixels.count != width * height * 4 {
-            readbackPixels = [UInt8](repeating: 0, count: width * height * 4)
-        }
-
-        texture.getBytes(
-            &readbackPixels,
-            bytesPerRow: bytesPerRow,
-            from: MTLRegion(
-                origin: MTLOrigin(x: 0, y: 0, z: 0),
-                size: MTLSize(width: width, height: height, depth: 1)
-            ),
-            mipmapLevel: 0
-        )
-
-        guard let provider = CGDataProvider(data: Data(readbackPixels) as CFData) else {
-            latestFallbackImage = nil
-            return
-        }
-        let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(
-            .init(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
-        )
-        latestFallbackImage = CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: bitmapInfo,
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )
-    }
-
-    override func draw(_ rect: NSRect) {
-        NSColor.black.setFill()
-        rect.fill()
-        guard let context = NSGraphicsContext.current?.cgContext,
-              let latestFallbackImage else { return }
-        context.saveGState()
-        context.translateBy(x: 0.0, y: bounds.height)
-        context.scaleBy(x: 1.0, y: -1.0)
-        context.draw(latestFallbackImage, in: bounds)
-        context.restoreGState()
+        return false
     }
 
     override func animateOneFrame() {
         updateAnimation()
-        if renderFrame() {
-            setNeedsDisplay(bounds)
-        }
+        renderFrame()
     }
 
     // MARK: - Configuration sheet

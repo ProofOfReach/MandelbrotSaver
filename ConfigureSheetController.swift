@@ -1,6 +1,6 @@
 import AppKit
 
-final class ConfigureSheetController: NSObject {
+final class ConfigureSheetController: NSObject, NSWindowDelegate {
     private let preferences = Preferences.shared
     private var window: NSWindow?
 
@@ -27,6 +27,7 @@ final class ConfigureSheetController: NSObject {
         )
         sheet.title = "Hyperspace Bloom Options"
         sheet.isReleasedWhenClosed = false
+        sheet.delegate = self
         let contentView = createContentView()
         sheet.contentView = contentView
 
@@ -303,6 +304,11 @@ final class ConfigureSheetController: NSObject {
         } else {
             window.close()
         }
-        self.window = nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow,
+              closingWindow === window else { return }
+        window = nil
     }
 }

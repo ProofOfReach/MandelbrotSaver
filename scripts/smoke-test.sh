@@ -13,6 +13,9 @@ METAL_LIBRARY="${CONTENTS_DIR}/Resources/default.metallib"
 SETTINGS_APP="Hyperspace Bloom Settings.app"
 SETTINGS_CONTENTS_DIR="${SETTINGS_APP}/Contents"
 SETTINGS_EXECUTABLE="${SETTINGS_CONTENTS_DIR}/MacOS/HyperspaceBloomSettings"
+MANDELBROT_SETTINGS_APP="Mandelbrot Settings.app"
+MANDELBROT_SETTINGS_CONTENTS_DIR="${MANDELBROT_SETTINGS_APP}/Contents"
+MANDELBROT_SETTINGS_EXECUTABLE="${MANDELBROT_SETTINGS_CONTENTS_DIR}/MacOS/MandelbrotSettings"
 OUTPUT_DIR="${1:-.codex-outputs/render-audit}"
 
 ./build.sh
@@ -24,6 +27,9 @@ test -f "${CONTENTS_DIR}/Resources/thumbnail.png"
 test -f "${CONTENTS_DIR}/Resources/thumbnail@2x.png"
 test -d "$SETTINGS_APP"
 test -x "$SETTINGS_EXECUTABLE"
+test -d "$MANDELBROT_SETTINGS_APP"
+test -x "$MANDELBROT_SETTINGS_EXECUTABLE"
+test -f "${MANDELBROT_SETTINGS_CONTENTS_DIR}/Resources/default.metallib"
 
 PLIST_BUDDY=/usr/libexec/PlistBuddy
 [[ "$($PLIST_BUDDY -c 'Print :CFBundleExecutable' "${CONTENTS_DIR}/Info.plist")" == "$BUNDLE_NAME" ]]
@@ -32,12 +38,17 @@ PLIST_BUDDY=/usr/libexec/PlistBuddy
 [[ "$($PLIST_BUDDY -c 'Print :NSPrincipalClass' "${CONTENTS_DIR}/Info.plist")" == "MandalaView" ]]
 [[ "$($PLIST_BUDDY -c 'Print :CFBundleIdentifier' "${SETTINGS_CONTENTS_DIR}/Info.plist")" == "com.proofofreach.HyperspaceBloom.Settings" ]]
 [[ "$($PLIST_BUDDY -c 'Print :CFBundlePackageType' "${SETTINGS_CONTENTS_DIR}/Info.plist")" == "APPL" ]]
+[[ "$($PLIST_BUDDY -c 'Print :CFBundleIdentifier' "${MANDELBROT_SETTINGS_CONTENTS_DIR}/Info.plist")" == "com.proofofreach.MandelbrotSaver.Settings" ]]
+[[ "$($PLIST_BUDDY -c 'Print :CFBundlePackageType' "${MANDELBROT_SETTINGS_CONTENTS_DIR}/Info.plist")" == "APPL" ]]
 
 codesign --verify --deep --strict "$BUNDLE_DIR"
 codesign --verify --deep --strict "$SETTINGS_APP"
+codesign --verify --deep --strict "$MANDELBROT_SETTINGS_APP"
 lipo "$EXECUTABLE" -verify_arch arm64
 lipo "$SETTINGS_EXECUTABLE" -verify_arch arm64
+lipo "$MANDELBROT_SETTINGS_EXECUTABLE" -verify_arch arm64
 "$SETTINGS_EXECUTABLE" --smoke-test
+"$MANDELBROT_SETTINGS_EXECUTABLE" --smoke-test
 
 if [ -d "/Applications/Xcode.app" ]; then
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"

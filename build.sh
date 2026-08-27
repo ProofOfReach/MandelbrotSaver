@@ -19,6 +19,10 @@ MANDELBROT_BUNDLE_DIR="${MANDELBROT_BUNDLE_NAME}.saver"
 MANDELBROT_CONTENTS_DIR="${MANDELBROT_BUNDLE_DIR}/Contents"
 MANDELBROT_MACOS_DIR="${MANDELBROT_CONTENTS_DIR}/MacOS"
 MANDELBROT_RESOURCES_DIR="${MANDELBROT_CONTENTS_DIR}/Resources"
+MANDELBROT_SETTINGS_NAME="MandelbrotSettings"
+MANDELBROT_SETTINGS_APP="Mandelbrot Settings.app"
+MANDELBROT_SETTINGS_CONTENTS_DIR="${MANDELBROT_SETTINGS_APP}/Contents"
+MANDELBROT_SETTINGS_MACOS_DIR="${MANDELBROT_SETTINGS_CONTENTS_DIR}/MacOS"
 MODULE_CACHE_DIR="${TMPDIR:-/tmp}/hyperspace-bloom-module-cache"
 BUILD_DIR="${TMPDIR:-/tmp}/hyperspace-bloom-build"
 
@@ -52,6 +56,7 @@ echo "   Using: $DEVELOPER_DIR"
 rm -rf "$BUNDLE_DIR"
 rm -rf "$SETTINGS_APP"
 rm -rf "$MANDELBROT_BUNDLE_DIR"
+rm -rf "$MANDELBROT_SETTINGS_APP"
 rm -rf "$BUILD_DIR"
 
 # Create bundle structure
@@ -62,11 +67,13 @@ mkdir -p "$BUILD_DIR"
 mkdir -p "$SETTINGS_MACOS_DIR"
 mkdir -p "$MANDELBROT_MACOS_DIR"
 mkdir -p "$MANDELBROT_RESOURCES_DIR"
+mkdir -p "$MANDELBROT_SETTINGS_MACOS_DIR"
 
 # Copy Info.plist
 cp Info.plist "${CONTENTS_DIR}/"
 cp SettingsInfo.plist "${SETTINGS_CONTENTS_DIR}/Info.plist"
 cp "${MANDELBROT_SOURCE_DIR}/Info.plist" "${MANDELBROT_CONTENTS_DIR}/Info.plist"
+cp "${MANDELBROT_SOURCE_DIR}/SettingsInfo.plist" "${MANDELBROT_SETTINGS_CONTENTS_DIR}/Info.plist"
 
 # Copy thumbnail images
 if [ -f "thumbnail.png" ]; then
@@ -85,8 +92,10 @@ xcrun -sdk macosx metallib Mandala.air -o "${RESOURCES_DIR}/default.metallib"
 rm Mandala.air
 
 echo "📐 Compiling Mandelbrot shader..."
-xcrun -sdk macosx metal -O2 -ffast-math -fmodules-cache-path="$MODULE_CACHE_DIR" -c "${MANDELBROT_SOURCE_DIR}/Mandelbrot.metal" -o "${BUILD_DIR}/Mandelbrot.air"
+xcrun -sdk macosx metal -O2 -fmodules-cache-path="$MODULE_CACHE_DIR" -c "${MANDELBROT_SOURCE_DIR}/Mandelbrot.metal" -o "${BUILD_DIR}/Mandelbrot.air"
 xcrun -sdk macosx metallib "${BUILD_DIR}/Mandelbrot.air" -o "${MANDELBROT_RESOURCES_DIR}/default.metallib"
+mkdir -p "${MANDELBROT_SETTINGS_CONTENTS_DIR}/Resources"
+cp "${MANDELBROT_RESOURCES_DIR}/default.metallib" "${MANDELBROT_SETTINGS_CONTENTS_DIR}/Resources/default.metallib"
 
 # Compile Swift code (Apple Silicon only)
 echo "🔧 Compiling Swift code..."
@@ -141,6 +150,23 @@ swiftc \
     -framework IOKit \
     "${MANDELBROT_SWIFT_SOURCES[@]}"
 
+echo "⚙️  Compiling Mandelbrot settings app..."
+swiftc \
+    -O \
+    -parse-as-library \
+    -module-cache-path "$MODULE_CACHE_DIR" \
+    -target "arm64-apple-macosx12.0" \
+    -sdk "$SDK_PATH" \
+    -o "${MANDELBROT_SETTINGS_MACOS_DIR}/${MANDELBROT_SETTINGS_NAME}" \
+    -module-name "${MANDELBROT_SETTINGS_NAME}" \
+    -framework ScreenSaver \
+    -framework Metal \
+    -framework AppKit \
+    -framework Foundation \
+    -framework IOKit \
+    "${MANDELBROT_SWIFT_SOURCES[@]}" \
+    "${MANDELBROT_SOURCE_DIR}/SettingsApp.swift"
+
 echo "⚙️  Compiling settings app..."
 swiftc \
     -O \
@@ -162,8 +188,9 @@ echo "🔏 Code signing..."
 codesign --force --sign - "${BUNDLE_DIR}"
 codesign --force --sign - "${SETTINGS_APP}"
 codesign --force --sign - "${MANDELBROT_BUNDLE_DIR}"
+codesign --force --sign - "${MANDELBROT_SETTINGS_APP}"
 
-echo "✅ Build complete: ${BUNDLE_DIR}, ${MANDELBROT_BUNDLE_DIR}, and ${SETTINGS_APP}"
+echo "✅ Build complete: ${BUNDLE_DIR}, ${MANDELBROT_BUNDLE_DIR}, ${SETTINGS_APP}, and ${MANDELBROT_SETTINGS_APP}"
 
 # Optional: Install to user's Screen Savers folder
 if [[ "${1:-}" == "--install" ]]; then
@@ -174,12 +201,15 @@ if [[ "${1:-}" == "--install" ]]; then
     rm -rf "${INSTALL_DIR}/${BUNDLE_DIR}"
     rm -rf "${INSTALL_DIR}/${MANDELBROT_BUNDLE_DIR}"
     rm -rf "${SETTINGS_INSTALL_DIR}/${SETTINGS_APP}"
+    rm -rf "${SETTINGS_INSTALL_DIR}/${MANDELBROT_SETTINGS_APP}"
     cp -R "$BUNDLE_DIR" "$INSTALL_DIR/"
     cp -R "$MANDELBROT_BUNDLE_DIR" "$INSTALL_DIR/"
     cp -R "$SETTINGS_APP" "$SETTINGS_INSTALL_DIR/"
+    cp -R "$MANDELBROT_SETTINGS_APP" "$SETTINGS_INSTALL_DIR/"
     echo "📦 Installed to: ${INSTALL_DIR}/${BUNDLE_DIR}"
     echo "📦 Installed to: ${INSTALL_DIR}/${MANDELBROT_BUNDLE_DIR}"
     echo "⚙️  Settings: ${SETTINGS_INSTALL_DIR}/${SETTINGS_APP}"
+    echo "⚙️  Settings: ${SETTINGS_INSTALL_DIR}/${MANDELBROT_SETTINGS_APP}"
     echo ""
     echo "Open System Settings > Screen Saver to select 'Hyperspace Bloom'"
 fi
