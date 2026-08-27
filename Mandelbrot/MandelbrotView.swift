@@ -287,6 +287,11 @@ class MandelbrotView: ScreenSaverView {
     }
 
     private func loadPreferences() {
+        CFPreferencesSynchronize(
+            "com.proofofreach.MandelbrotSaver" as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
         let prefs = Preferences.shared
         let previousJuliaEnabled = juliaEnabled
         let newPalette = prefs.paletteIndex
@@ -1079,8 +1084,8 @@ class MandelbrotView: ScreenSaverView {
     override var hasConfigureSheet: Bool {
         // macOS 26.5's legacyScreenSaver extension crashes inside Apple's
         // presentConfiguration path before loading third-party bundle code.
-        // Hide the broken system button on affected releases; build.sh also
-        // installs a standalone settings app using the same controller.
+        // Hide the broken system button on affected releases; use Mandelbrot
+        // Settings.app instead.
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return !(version.majorVersion == 26 && version.minorVersion <= 5)
     }

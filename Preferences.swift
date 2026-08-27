@@ -31,8 +31,11 @@ final class Preferences {
     }
 
     private let defaults: ScreenSaverDefaults?
+    private let mirrorsIntoEngineContainer: Bool
 
     private init() {
+        let bundlePath = Bundle(for: Preferences.self).bundlePath
+        mirrorsIntoEngineContainer = !bundlePath.contains(".saver")
         defaults = ScreenSaverDefaults(forModuleWithName: Self.moduleIdentifier)
         defaults?.register(defaults: [
             Keys.motionSpeed: Defaults.motionSpeed,
@@ -43,6 +46,9 @@ final class Preferences {
             Keys.visualQuality: Defaults.visualQuality,
             Keys.batterySaver: Defaults.batterySaver,
         ])
+        if mirrorsIntoEngineContainer {
+            writeEnginePlist()
+        }
     }
 
     var motionSpeed: Double {
@@ -155,6 +161,9 @@ final class Preferences {
 
     private func persistAndNotify() {
         defaults?.synchronize()
+        if mirrorsIntoEngineContainer {
+            writeEnginePlist()
+        }
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
@@ -171,4 +180,59 @@ final class Preferences {
     static let symmetryValues = [0, 6, 7, 8, 10, 12]
     static let intensityNames = ["Calm", "Visionary", "Maximum"]
     static let visualQualityNames = ["Standard", "Ultra"]
+
+    private static var engineByHostDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.apple.ScreenSaver.Engine.legacyScreenSaver/Data/Library/Preferences/ByHost")
+    }
+
+    private static func byHostUUID(in directory: URL) -> String? {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return nil }
+        for url in urls where url.pathExtension == "plist" {
+            let base = url.deletingPathExtension().lastPathComponent
+            guard let dot = base.lastIndex(of: ".") else { continue }
+            let uuid = String(base[base.index(after: dot)...])
+            if uuid.count == 36 { return uuid }
+        }
+        return nil
+    }
+
+    private func enginePlistURL() -> URL? {
+        let dir = Self.engineByHostDirectory
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let uuid = Self.byHostUUID(in: dir)
+            ?? Self.byHostUUID(in: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Preferences/ByHost"))
+        guard let uuid else { return nil }
+        return dir.appendingPathComponent("\(Self.moduleIdentifier).\(uuid).plist")
+    }
+
+    private func writeEnginePlist() {
+        guard let url = enginePlistURL(), let defaults else { return }
+        var dict = (NSDictionary(contentsOf: url) as? [String: Any]) ?? [:]
+        for key in [
+            Keys.motionSpeed,
+            Keys.paletteIndex,
+            Keys.autoCyclePalettes,
+            Keys.symmetryIndex,
+            Keys.intensity,
+            Keys.visualQuality,
+            Keys.batterySaver
+        ] {
+            if let value = defaults.object(forKey: key) {
+                dict[key] = value
+            }
+        }
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: dict,
+            format: .binary,
+            options: 0
+        ) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
 }
